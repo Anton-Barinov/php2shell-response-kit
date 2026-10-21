@@ -180,6 +180,22 @@ Flatt Security'nin işaret ettiği *mekanizmayı* test ettik — açığın kend
 * PHP kılavuzu — Session Upload Progress: https://www.php.net/manual/en/session.upload-progress.php
 * Red Hat RHSA-2026:22143 · Rocky RLSA-2026:34354 · Debian DSA-6255-1 · Ubuntu USN-8564-1 (yama gecikmesi örnekleri)
 
+## 11. ORBITRON üzerinden çalıştırma
+
+ORBITRON müşterileri aynı incelemeyi hazır bir komut playbook'u olarak çalıştırabilir:
+*PHP exposure and behavior investigation*. Playbook, filo genelinde salt okunur PHP / web worker
+envanteri ve sınırlı kanıt toplama yapar.
+
+![ORBITRON playbook: PHP exposure and behavior investigation](docs/images/orbitron-php2shell-investigation-playbook.png)
+
+Playbook işletim sistemine göre dallanır. Linux sunucular ve container host'ları için PHP
+envanteri, worker'lar, dosyalar, bağlantılar ve Docker bilgisi toplanır. Windows web sunucuları
+için PHP/IIS envanteri, worker'lar, dosyalar ve bağlantılar toplanır. Her dal kanıtı ve kapsam
+raporunu döndürür. Desteklenmeyen işletim sistemleri de ayrıca raporlanır, böylece kör noktalar
+görünür kalır.
+
+`scripts/` altındaki script'ler bağımsızdır, ORBITRON gerektirmez.
+
 ## Sorumluluk reddi ve lisans
 
 Savunma amaçlı, olduğu gibi ve garanti olmaksızın sunulmuştur. Script ve kuralları üretimde kullanmadan

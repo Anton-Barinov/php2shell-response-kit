@@ -7,6 +7,9 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.0.1 — 2026-10-21
+* README: added the ORBITRON investigation playbook (screenshot) as section 11.
+
 ## Planned — after 14:00 UTC
 * Add official affected/fixed versions; set default `FIXED_UPSTREAM` in the scripts.
 * Replace/extend behavioural rules with trigger-specific signatures once the patch diff is public.

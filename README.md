@@ -183,6 +183,21 @@ We tested the *mechanism* Flatt Security points to — not the vulnerability:
 * PHP manual — Session Upload Progress: https://www.php.net/manual/en/session.upload-progress.php
 * Red Hat RHSA-2026:22143 · Rocky RLSA-2026:34354 · Debian DSA-6255-1 · Ubuntu USN-8564-1 (patch-latency data points)
 
+## 11. Running it from ORBITRON
+
+ORBITRON customers can run the same investigation as a ready-made command playbook,
+*PHP exposure and behavior investigation*: read-only PHP / web-worker inventory and bounded
+evidence collection across the fleet.
+
+![ORBITRON playbook: PHP exposure and behavior investigation](docs/images/orbitron-php2shell-investigation-playbook.png)
+
+The playbook branches on the host OS. Linux hosts and container hosts collect PHP inventory,
+workers, files, connections and Docker; Windows web hosts collect PHP/IIS inventory, workers,
+files and connections. Each branch returns its evidence and a coverage report, and unsupported
+operating systems are reported as such, so gaps stay visible.
+
+The scripts in `scripts/` are standalone and do not require ORBITRON.
+
 ## Disclaimer & license
 
 Provided as-is for defensive use, without warranty. Validate scripts and rules in your environment
