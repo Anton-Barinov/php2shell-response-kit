@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.2.0  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.2.1  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -31,7 +31,7 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
 # Fixed upstream versions. EMPTY until the official PHP advisory is published
@@ -101,11 +101,14 @@ case " $OS_ID $OS_LIKE " in
   *" suse "*|*" sles "*|*" opensuse "*) PKG_FAMILY="rpm" ;;
 esac
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# Mount namespace of this script. Processes in another mount namespace run in a
-# container: their /proc/<pid>/exe path refers to the CONTAINER file system and
-# must not be matched against binaries of this host.
-SELF_MNT="$(readlink /proc/self/ns/mnt 2>/dev/null)"
-same_mnt() { local m; m="$(readlink "/proc/$1/ns/mnt" 2>/dev/null)"; [ -z "$m" ] || [ -z "$SELF_MNT" ] || [ "$m" = "$SELF_MNT" ]; }
+# Root file system of this script. A process whose root (/proc/<pid>/root) is a
+# different file system runs in a container: its /proc/<pid>/exe path refers to
+# the CONTAINER file system and must not be matched against binaries of this
+# host. A different mount namespace alone is NOT a container: systemd services
+# with PrivateTmp=/ProtectSystem= (php-fpm, httpd on RHEL and Debian) get their
+# own mount namespace but share the host root.
+SELF_ROOT="$(stat -L -c '%d:%i' /proc/self/root/ 2>/dev/null)"
+same_root() { local r; r="$(stat -L -c '%d:%i' "/proc/$1/root/" 2>/dev/null)"; [ -z "$r" ] || [ -z "$SELF_ROOT" ] || [ "$r" = "$SELF_ROOT" ]; }
 [ "$(id -u)" -eq 0 ] || say "WARNING: not running as root - some configs/changelogs may be unreadable."
 
 # --------------------------------------------------------------------------
@@ -136,7 +139,7 @@ done
 # binaries of running processes (catches custom builds in odd paths)
 if [ -d /proc ]; then
   for exe in /proc/[0-9]*/exe; do
-    same_mnt "$(basename "$(dirname "$exe")")" || continue   # container process: handled in section 6
+    same_root "$(basename "$(dirname "$exe")")" || continue   # container process: handled in section 6
     t="$(readlink "$exe" 2>/dev/null)" || continue
     case "$(basename "$t")" in php|php[0-9]*|php-fpm*|php-cgi*|lsphp*) CANDIDATES+=("$t") ;; esac
   done
@@ -241,7 +244,7 @@ if have ps; then
     [ -n "$pid" ] || continue
     P_PPID[$pid]="$ppid"; P_START[$pid]=$((NOW_EPOCH - et))
     P_EXE[$pid]="$(readlink "/proc/$pid/exe" 2>/dev/null)"
-    if same_mnt "$pid"; then P_HOST[$pid]=1; else P_HOST[$pid]=0; fi
+    if same_root "$pid"; then P_HOST[$pid]=1; else P_HOST[$pid]=0; fi
   done < <(ps -eo pid=,ppid=,etimes= 2>/dev/null)
 fi
 ANY_STALE=0
@@ -543,7 +546,7 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
   for pid in "${!P_EXE[@]}"; do
     [ "${P_HOST[$pid]:-1}" = "0" ] || continue
     is_php_proc "$pid" || continue
-    ns="$(readlink "/proc/$pid/ns/mnt" 2>/dev/null)" || continue
+    ns="$(stat -L -c '%d:%i' "/proc/$pid/root/" 2>/dev/null)" || continue   # group by container root
     NS_PIDS[$ns]="${NS_PIDS[$ns]:-} $pid"
   done
   [ ${#NS_PIDS[@]} -eq 0 ] && say "   no PHP processes found in containers"
@@ -555,6 +558,14 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     if [ ! -r "$root/" ]; then say "   [pid $rep] container root not readable (run as root)"; continue; fi
     cid="$(container_id_of "$rep")"; cname="$(container_name_of "$cid")"
     exe_in="${P_EXE[$rep]% (deleted)}"
+    # Normalise to the path inside the container: depending on how the container
+    # root was set up, the kernel may report the path with a host-side prefix.
+    exe_id="$(stat -L -c '%d:%i' "/proc/$rep/exe" 2>/dev/null)"
+    cand="$exe_in"
+    while [ -n "$cand" ]; do
+      if [ -e "$root$cand" ] && { [ -z "$exe_id" ] || [ "$(stat -L -c '%d:%i' "$root$cand" 2>/dev/null)" = "$exe_id" ]; }; then exe_in="$cand"; break; fi
+      case "$cand" in /*/*) cand="/${cand#/*/}" ;; *) cand="" ;; esac
+    done
     env_blob=""
     for q in "${pids[@]}"; do   # php-fpm overwrites its own environ (process title) - try all processes
       e="$(tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null)"
@@ -597,8 +608,8 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     elif [ -d "$root/var/lib/rpm" ] && [ "${exe_in#/usr/local/}" = "$exe_in" ] && [ -z "$owner" ]; then
       pkg="rpm-package"; porigin="rpm-based image"; pcl="unknown (rpm DB not read without executing rpm)"
     fi
-    if [ -z "$ver" ] && [ -r "$root$exe_in" ]; then
-      ver="$(grep -a -m1 -oE 'X-Powered-By: PHP/[0-9]+\.[0-9]+\.[0-9]+' "$root$exe_in" 2>/dev/null | head -n1 | sed 's/.*PHP\///')"
+    if [ -z "$ver" ] && [ -r "/proc/$rep/exe" ]; then
+      ver="$(grep -a -m1 -oE 'X-Powered-By: PHP/[0-9]+\.[0-9]+\.[0-9]+' "/proc/$rep/exe" 2>/dev/null | head -n1 | sed 's/.*PHP\///')"
       [ -n "$ver" ] && vsrc="binary string"
     fi
     if [ -z "$ver" ]; then
@@ -656,7 +667,7 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     NPHP=$((NPHP+1))
     if [ -n "$cname" ]; then label_c="$cname${cid:+ (id ${cid:0:12})}"
     elif [ -n "$cid" ]; then label_c="id ${cid:0:12}"
-    else label_c="unidentified (mount namespace ${ns#mnt:})"; fi
+    else label_c="unidentified (root fs $ns)"; fi
     say "   Container: $label_c"
     say "      Process  : $(basename "$exe_in") x${#pids[@]} (host pid $rep, path in container $exe_in, layout $layout)"
     say "      Version  : ${ver:-unknown}${vsrc:+ (from $vsrc)}   branch ${br:-?}: $bstate"

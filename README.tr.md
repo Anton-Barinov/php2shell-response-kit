@@ -1,6 +1,6 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON müdahale kiti
 
-> **Durum: v1.2 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 13:20 TSİ / 10:20 UTC).**
+> **Durum: v1.2.1 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 14:00 TSİ / 11:00 UTC).**
 > Teknik detayları, etkilenen ve düzeltilmiş sürümleri içeren resmi PHP duyurusu
 > **21.10.2026 17:00 TSİ (14:00 UTC)** için planlandı. Sürüm çıktıktan sonra bu repo güncellenecek.
 > Aşağıda *bildirilen* veya *doğrulanmamış* olarak işaretlenen her şey değişebilir. Değişiklikler: [CHANGELOG.md](CHANGELOG.md).

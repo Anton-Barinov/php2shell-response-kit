@@ -7,6 +7,15 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.2.1 — 2026-10-21 14:00 TRT
+* **Fix (Linux, regression in v1.2.0):** v1.2.0 treated every process in another mount namespace as a
+  container. systemd services with `PrivateTmp=`/`ProtectSystem=` (php-fpm and httpd on RHEL/Rocky and Debian)
+  have their own mount namespace, so the host's php-fpm was reported as an unidentified "container" and the
+  host `php-fpm` runtime showed `not running`. Containers are now detected by a different root file system
+  (`/proc/<pid>/root` device:inode), not by mount namespace. Found on a Rocky Linux 10.2 production host.
+* Container binary path is normalised to the path inside the container (verified by inode against
+  `/proc/<pid>/exe`); the version string is read from `/proc/<pid>/exe`.
+
 ## v1.2.0 — 2026-10-21 13:20 TRT
 * **Fix (Linux):** processes running in a container were matched to host binaries with the same path
   (`/proc/<pid>/exe` shows the path inside the container). This could put container workers into the host
