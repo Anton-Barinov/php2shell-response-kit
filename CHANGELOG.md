@@ -7,6 +7,14 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.5 — 2026-10-21
+* docs (EN + TR): added a "traffic and access-log footprint" section — the access-log hole (a request that
+  dies at request start-up leaves an error-log line but no access-log entry; lab-re-confirmed with
+  `exited with code 70` and no access line), the calibration pattern (growing bytes_in + super-linear dur
+  from the O(n^2) upload-progress re-encode), traffic-volume estimates and disk artifacts. Added two
+  correlation rules (access-log hole, calibration). The pre-RINIT file-write is noted as preload-dependent
+  (not externally reachable), so worker-uid files are framed as a post-exploitation signal, not proof of RCE.
+
 ## v1.3.4 — 2026-10-21
 * Added a detailed detection & response field guide (EN + TR) under `docs/`, linked from the README:
   root cause, SAPI differences, lab verification matrix, trigger signatures with real log examples,

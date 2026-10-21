@@ -160,6 +160,16 @@ Bu grup, sömürü **ilerlemişse** görülen izlerdir. Önemli bir ayırım var
 
 **Not:** Başarılı **sessiz** sömürü (saf memory disclosure) hiç log üretmeyebilir. Bu yüzden B grubu + yanıt boyutu anomalileri birlikte izlenmeli. `Set-Cookie` ve response boyutu izleri bildirilmiş vektörlere dayanır; bizim labımızda memory disclosure üretilmediğinden bunları *bildirilen* (doğrulanmamış) sinyaller olarak ele alın.
 
+## Trafik ve access log ayak izi
+
+Saldırı yüzeyde "normal" görünebilir; status kodu taraması tek başına yetmez. Bu bölümdeki desenler ORBITRON lab'inde ölçülmüştür; access log deliği ve code-70 davranışı bu rehber için yeniden teyit edildi.
+
+- **Status değil, davranış:** Kod çalıştıran multipart POST bile `status=200` döner; var olmayan bir endpoint'e (`404`) gelen büyük multipart POST da anormaldir. Access log'da aranacak şey URI'nin var/yok oluşu değil, **büyük/çok-part'lı multipart POST** davranışıdır.
+- **⭐ Access log deliği (teyitli):** İstek *request startup'ta* (parse sırasında) ölürse FPM **access log'a hiç yazılmaz**, ama error log'da izi kalır. Lab'de normal istek access log'a düştü; OOM tetikleyen istek düşmedi ve worker `exited with code 70` ile kapandı. **Korelasyon kuralı:** error log'daki `Allowed memory size ... in Unknown on line 0` (veya `exited with code 70`) satırının access log'da zaman/pool karşılığı yoksa, o istek başlatmada ölmüştür = php2shell tarzı tetik denemesi (patchli sürümde bile).
+- **Kalibrasyon deseni:** Sömürü, limiti istenen noktada kırmak için kademeli büyüyen gövdelerle dener. Aynı URI'ye **monoton büyüyen `bytes_in` serisi** (≥4-5 istek) ve gövde boyutuyla **süper-lineer artan `dur`** (upload-progress her part'ta session'ı yeniden encode ettiği için ~O(n²)) = kalibrasyon + yan etki olarak CPU/DoS. Tek başına MEDIUM; error-log imzalarıyla birlikte CRITICAL.
+- **Trafik hacmi (tahmin):** Lab'de düşük `memory_limit` ile tetik birkaç yüz KB'lık gövdeyle oluşur; üretimdeki 128M sınırında bu kabaca onlarca kat büyür (~9-18 MB mertebesi). Ama uzun alan/dosya isimleri gibi amplifikasyon kolları gövdeyi küçük tutarken belleği büyük tükettiğinden, hacim eşiği tek başına kural olamaz — desenle birlikte kullanın.
+- **Disk artefaktları:** Uygulama `session_start()` çağırmasa bile upload-progress saldırısında session dizininde `sess_*` yazma/mtime churn olur; session kullanmayan bir endpoint'te bu güçlü bir anomalidir. Ayrıca php-fpm/www-data kullanıcısına ait beklenmedik yeni dosyalar (bkz. post-exploitation). Not: Motorun RINIT'ten önce worker kimliğiyle **dosya yazabilmesi** lab'de yalnızca `opcache.preload` + session'a yerleştirilmiş bir gadget sınıfıyla (sunucu tarafı işbirliği) gösterildi; dışarıdan bir saldırgan bunu kendi başına kuramaz. Bu yüzden worker-uid'li yeni dosyaları genel bir RCE kanıtı değil, post-exploitation av sinyali olarak değerlendirin.
+
 ## Post-exploitation hunting
 
 Kod çalıştırma gerçekleştiyse, PHP worker kullanıcısı (www-data / apache / php-fpm) adına beklenmedik süreç, dosya ve ağ etkinliği görülür.
@@ -187,6 +197,8 @@ PHP hata satırında kaynak IP **bulunmayabilir**; IP'yi HTTP access/WAF kaydıy
 | HIGH | C grubu (worker'dan execve/webshell) uygulamanın bilinen davranışı değilse | Sömürü sonrası → IR |
 | MEDIUM | A1 + FPM `code 70` (aynı pool/zaman) | OOM tetiği FPM worker'ı düşürdü |
 | MEDIUM | B grubu çökme sinyalleri, uygulamanın bilinen crash nedeni yoksa | Bellek bozulması olası |
+| CRITICAL | Error log'da `Allowed memory size ... in Unknown on line 0` **var** && access log'da aynı zamana karşılık **yok** | Startup'ta ölmüş istek = tetik denemesi (access log deliği) |
+| MEDIUM | Aynı URI'ye ≥4 monoton büyüyen `bytes_in` && `dur` süper-lineer | Kalibrasyon — error-log imzalarıyla birlikte CRITICAL |
 
 **Örnek korelasyon zinciri:** Olağandışı multipart isteği → aynı sunucu/pool ve zaman aralığında A1/A2 → worker sonlanması (code 70) veya 5xx → benzer isteklerin tekrarı. Buna worker'dan beklenmedik komut/dosya/bağlantı eklenirse şüphe güçlenir.
 

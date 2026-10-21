@@ -160,6 +160,16 @@ This group is seen if exploitation **has progressed**. One important distinction
 
 **Note:** a successful **silent** exploitation (pure memory disclosure) may produce no logs at all. So the B group and response-size anomalies should be watched together. The `Set-Cookie` and response-size traces rely on reported vectors; since we did not produce memory disclosure in our lab, treat them as *reported* (unverified) signals.
 
+## Traffic and access-log footprint
+
+The attack can look "normal" on the surface; scanning status codes alone is not enough. The patterns here were measured in the ORBITRON lab; the access-log hole and the code-70 behaviour were re-confirmed for this guide.
+
+- **Behaviour, not status:** a code-executing multipart POST still returns `status=200`; a large multipart POST to a non-existent endpoint (`404`) is also anomalous. What to look for in the access log is not whether the URI exists but the **large / many-part multipart POST** behaviour.
+- **⭐ Access-log hole (confirmed):** a request that dies *during request start-up* (while parsing) is **never written to the FPM access log**, yet it leaves a trace in the error log. In the lab the normal request was logged; the OOM-triggering request was not, and the worker closed with `exited with code 70`. **Correlation rule:** if an `Allowed memory size ... in Unknown on line 0` (or `exited with code 70`) line in the error log has no matching access-log entry for the same time/pool, that request died at start-up = a php2shell-style trigger attempt (even on a patched version).
+- **Calibration pattern:** exploitation probes with gradually growing bodies to break the limit at the desired point. A **monotonically growing `bytes_in` series** to the same URI (≥4-5 requests) with **super-linear `dur`** (upload-progress re-encodes the session on every part, so ~O(n²)) = calibration plus a CPU/DoS side effect. MEDIUM on its own; CRITICAL together with the error-log signatures.
+- **Traffic volume (estimate):** in the lab with a low `memory_limit` the trigger fires with a few hundred KB of body; at a production 128M limit this grows roughly by tens of times (~9-18 MB range). But amplification levers such as long field/file names keep the body small while exhausting large amounts of memory, so a volume threshold cannot be a rule on its own — use it with the pattern.
+- **Disk artifacts:** even when the app never calls `session_start()`, an upload-progress attack causes `sess_*` writes / mtime churn in the session directory; on an endpoint that uses no sessions this is a strong anomaly. Also unexpected new files owned by the php-fpm/www-data user (see post-exploitation). Note: the engine being able to **write a file** with the worker identity before RINIT was shown in the lab only with `opcache.preload` plus a gadget class seeded into the session (server-side collaboration); an external attacker cannot set that up alone. So treat worker-uid-owned new files as a post-exploitation hunting signal, not as general proof of RCE.
+
 ## Post-exploitation hunting
 
 If code execution happened, you see unexpected process, file and network activity as the PHP worker user (www-data / apache / php-fpm).
@@ -187,6 +197,8 @@ The PHP error line **may not contain** a source IP; correlate the IP from the HT
 | HIGH | C group (execve/webshell from the worker) not the app's known behaviour | Post-exploitation → IR |
 | MEDIUM | A1 + FPM `code 70` (same pool/time) | OOM trigger took down an FPM worker |
 | MEDIUM | B-group crash signals, if no known app crash cause | Possible memory corruption |
+| CRITICAL | `Allowed memory size ... in Unknown on line 0` **present** in the error log && **no** matching access-log entry for the same time | Request died at start-up = trigger attempt (access-log hole) |
+| MEDIUM | ≥4 monotonically growing `bytes_in` to the same URI && super-linear `dur` | Calibration — CRITICAL together with the error-log signatures |
 
 **Example correlation chain:** unusual multipart request → A1/A2 in the same server/pool and time window → worker exit (code 70) or 5xx → repeated similar requests. Add an unexpected command/file/connection from the worker and suspicion strengthens.
 
