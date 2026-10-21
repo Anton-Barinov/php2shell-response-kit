@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.2.2  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.2.3  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -31,7 +31,7 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
 # Fixed upstream versions. EMPTY until the official PHP advisory is published
@@ -567,6 +567,22 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
       if [ -e "$root$cand" ] && { [ -z "$exe_id" ] || [ "$(stat -L -c '%d:%i' "$root$cand" 2>/dev/null)" = "$exe_id" ]; }; then exe_in="$cand"; break; fi
       case "$cand" in /*/*) cand="/${cand#/*/}" ;; *) cand="" ;; esac
     done
+    # The PHP code lives in the executable - except for Apache, where it is the
+    # mod_php library (libphp*.so). Package ownership and version must come from
+    # the PHP object, not from apache2/httpd.
+    php_obj="$exe_in"; php_obj_host="/proc/$rep/exe"
+    case "$(basename "$exe_in")" in
+      httpd|apache2)
+        lib="$(awk '$6 ~ /libphp[^\/]*\.so$/ {print $5" "$6; exit}' "/proc/$rep/maps" 2>/dev/null)"
+        lib_ino="${lib%% *}"; lib_path="${lib#* }"
+        cand="$lib_path"; php_obj=""
+        while [ -n "$cand" ]; do
+          if [ -e "$root$cand" ] && { [ -z "$lib_ino" ] || [ "$(stat -L -c '%i' "$root$cand" 2>/dev/null)" = "$lib_ino" ]; }; then php_obj="$cand"; break; fi
+          case "$cand" in /*/*) cand="/${cand#/*/}" ;; *) cand="" ;; esac
+        done
+        [ -n "$php_obj" ] && php_obj_host="$root$php_obj" || { php_obj="$lib_path"; php_obj_host=""; }
+        ;;
+    esac
     env_blob=""
     for q in "${pids[@]}"; do   # php-fpm overwrites its own environ (process title) - try all processes
       e="$(tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null)"
@@ -585,7 +601,7 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     pkg="unpackaged"; pver=""; porigin=""; pcl="n/a"
     owner=""
     if [ -d "$root/var/lib/dpkg/info" ]; then
-      owner="$(grep -lxF "$exe_in" "$root"/var/lib/dpkg/info/*.list 2>/dev/null | head -n1)"
+      owner="$(grep -lxF "$php_obj" "$root"/var/lib/dpkg/info/*.list 2>/dev/null | head -n1)"
       owner="$(basename "${owner%.list}" 2>/dev/null)"; owner="${owner%%:*}"
     fi
     if [ -n "$owner" ] && [ -r "$root/var/lib/dpkg/status" ]; then
@@ -600,17 +616,17 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
         fi
       done
       [ -z "$ver" ] && { ver="$(printf '%s' "$pver" | sed -n 's/^\([0-9]*:\)\{0,1\}\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\2/p')"; vsrc="dpkg"; }
-    elif [ -r "$root/lib/apk/db/installed" ] && [ "${exe_in#/usr/local/}" = "$exe_in" ]; then
+    elif [ -r "$root/lib/apk/db/installed" ] && [ "${php_obj#/usr/local/}" = "$php_obj" ] && [ -z "$(printf '%s\n' "$env_blob" | sed -n 's/^PHP_VERSION=//p')" ]; then
       line="$(awk -v RS= '/\nP:php[0-9]+(-fpm|-cgi|-common)?\n/ {p=$0; sub(/.*\nP:/,"",p); sub(/\n.*/,"",p); v=$0; sub(/.*\nV:/,"",v); sub(/\n.*/,"",v); print p"|"v; exit}' "$root/lib/apk/db/installed" 2>/dev/null)"
       if [ -n "$line" ]; then
         pkg="${line%%|*}"; pver="${line#*|}"; porigin="alpine"; pcl="check-secdb"
         [ -z "$ver" ] && { ver="${pver%%-r*}"; vsrc="apk"; }
       fi
-    elif [ -d "$root/var/lib/rpm" ] && [ "${exe_in#/usr/local/}" = "$exe_in" ] && [ -z "$owner" ]; then
+    elif [ -d "$root/var/lib/rpm" ] && [ "${php_obj#/usr/local/}" = "$php_obj" ] && [ -z "$owner" ] && [ -z "$(printf '%s\n' "$env_blob" | sed -n 's/^PHP_VERSION=//p')" ]; then
       pkg="rpm-package"; porigin="rpm-based image"; pcl="unknown (rpm DB not read without executing rpm)"
     fi
-    if [ -z "$ver" ] && [ -r "/proc/$rep/exe" ]; then
-      ver="$(grep -a -m1 -oE 'X-Powered-By: PHP/[0-9]+\.[0-9]+\.[0-9]+' "/proc/$rep/exe" 2>/dev/null | head -n1 | sed 's/.*PHP\///')"
+    if [ -z "$ver" ] && [ -n "$php_obj_host" ] && [ -r "$php_obj_host" ]; then
+      ver="$(grep -a -m1 -oE 'X-Powered-By: PHP/[0-9]+\.[0-9]+\.[0-9]+' "$php_obj_host" 2>/dev/null | head -n1 | sed 's/.*PHP\///')"
       [ -n "$ver" ] && vsrc="binary string"
     fi
     if [ -z "$ver" ]; then
@@ -632,6 +648,7 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     files=(); layout="distro"
     case "$exe_in" in /usr/local/*) layout="source-build" ;; esac
     [ -n "$ini_dir" ] && layout="source-build"
+    [ -n "$(printf '%s\n' "$env_blob" | sed -n 's/^PHP_VERSION=//p')" ] && layout="source-build"
     if [ "$layout" = "source-build" ]; then   # official php images and other /usr/local builds
       ini_dir="${ini_dir:-/usr/local/etc/php}"
       files+=("$root$ini_dir/php.ini" "$root$ini_dir"/conf.d/*.ini)
@@ -671,12 +688,13 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     else label_c="unidentified (root fs $ns)"; fi
     say "   Container: $label_c"
     say "      Process  : $(basename "$exe_in") x${#pids[@]} (host pid $rep, path in container $exe_in, layout $layout)"
+    [ "$php_obj" != "$exe_in" ] && say "      PHP      : mod_php module ${php_obj:-not found in /proc/$rep/maps}"
     say "      Version  : ${ver:-unknown}${vsrc:+ (from $vsrc)}   branch ${br:-?}: $bstate"
     say "      Package  : $pkg ${pver} ${porigin:+[$porigin]}"
     say "      Fix      : $fs"
     say "      upload_progress.enabled: $upe (set in: $upsrc; parsed from files, not executed)"
     say "      Running  : $STATE_TEXT"
-    CONT_JSON+=("{\"container_id\":$(json_str "$cid"),\"name\":$(json_str "$cname"),\"host_pid\":$rep,\"processes\":${#pids[@]},\"binary\":$(json_str "$exe_in"),\"version\":$(json_str "$ver"),\"version_source\":$(json_str "$vsrc"),\"branch_state\":$(json_str "$bstate"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"upload_progress_enabled\":$(json_str "$upe"),\"upload_progress_source\":$(json_str "$upsrc"),\"runtime_state\":${STATE_JSON//$root/}}")
+    CONT_JSON+=("{\"container_id\":$(json_str "$cid"),\"name\":$(json_str "$cname"),\"host_pid\":$rep,\"processes\":${#pids[@]},\"binary\":$(json_str "$exe_in"),\"php_object\":$(json_str "$php_obj"),\"version\":$(json_str "$ver"),\"version_source\":$(json_str "$vsrc"),\"branch_state\":$(json_str "$bstate"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"upload_progress_enabled\":$(json_str "$upe"),\"upload_progress_source\":$(json_str "$upsrc"),\"runtime_state\":${STATE_JSON//$root/}}")
   done
 fi
 

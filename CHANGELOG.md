@@ -7,6 +7,13 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.2.3 — 2026-10-21 14:55 TRT
+* **Fix (Linux):** for Apache + mod_php containers (e.g. official `php:*-apache` images) package and
+  fix status were taken from the Apache executable (`apache2-bin`), not from PHP. The script now reads the
+  loaded `libphp*.so` from `/proc/<pid>/maps` (verified by inode) and uses it for package ownership and
+  version; the report shows it as `PHP : mod_php module ...`. Found during validation on a Docker host.
+* Containers with `PHP_VERSION` in their environment (official images) are always treated as source builds.
+
 ## v1.2.2 — 2026-10-21 14:00 TRT
 * **Fix (Linux):** on hosts without any PHP container the container section aborted with
   `NS_PIDS: unbound variable` (`set -u` with an empty associative array). Arrays are now initialised and

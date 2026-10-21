@@ -1,6 +1,6 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON response kit
 
-> **Status: v1.2.2 — PRE-DISCLOSURE (2026-10-21 14:00 TRT / 11:00 UTC).**
+> **Status: v1.2.3 — PRE-DISCLOSURE (2026-10-21 14:55 TRT / 11:55 UTC).**
 > The official PHP advisory with technical details, affected and fixed versions is scheduled for
 > **2026-10-21 14:00 UTC (17:00 TRT)**. This repository will be updated after the release.
 > Everything marked *reported* or *unconfirmed* below may change. Check [CHANGELOG.md](CHANGELOG.md).

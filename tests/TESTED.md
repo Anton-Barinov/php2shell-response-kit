@@ -1,4 +1,4 @@
-# What was tested (v1.2.2)
+# What was tested (v1.2.3)
 
 | Component | Test | Result |
 |---|---|---|
