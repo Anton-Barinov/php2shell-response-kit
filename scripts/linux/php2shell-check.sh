@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.2.3  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.3.0  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -8,6 +8,9 @@
 #  vulnerability. It inventories PHP runtimes and reports:
 #    - PHP binaries / SAPIs (CLI, FPM, CGI, LiteSpeed, mod_php)
 #    - effective session.upload_progress.* and related settings per SAPI
+#    - the interim mitigations from the PHP advisory (memory_limit=-1,
+#      post_max_size, session.upload_progress.enabled=0,
+#      fatal_error_backtraces=0 on 8.5) - these reduce exposure only
 #    - per-pool / per-directory / web-server level overrides of those settings
 #    - owning package, repository origin and whether the package changelog
 #      already mentions the CVE IDs (distribution backport detection)
@@ -31,13 +34,13 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.3.0"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
-# Fixed upstream versions. EMPTY until the official PHP advisory is published
-# (scheduled 2026-10-21 14:00 UTC). Fill in, e.g. "8.2.35 8.3.36 8.4.27 8.5.12",
-# ONLY from https://www.php.net/ - rumoured numbers must not be used here.
-FIXED_UPSTREAM="${PHP2SHELL_FIXED_UPSTREAM:-}"
+# Fixed upstream versions, from the official PHP security release of
+# 2026-10-21 (https://www.php.net/ - "Avoid state corruption via bailout").
+# Override with PHP2SHELL_FIXED_UPSTREAM="..." if needed.
+FIXED_UPSTREAM="${PHP2SHELL_FIXED_UPSTREAM:-8.2.35 8.3.36 8.4.27 8.5.12}"
 
 # Branches that receive upstream security fixes (php.net/supported-versions).
 SUPPORTED_BRANCHES="8.2 8.3 8.4 8.5"
@@ -159,7 +162,46 @@ done
 # --------------------------------------------------------------------------
 # helpers to read effective settings
 # --------------------------------------------------------------------------
-KEYS="session.upload_progress.enabled session.upload_progress.cleanup session.upload_progress.name session.upload_progress.prefix session.use_strict_mode session.save_handler session.save_path file_uploads cgi.fix_pathinfo"
+KEYS="memory_limit post_max_size fatal_error_backtraces session.upload_progress.enabled session.upload_progress.cleanup session.upload_progress.name session.upload_progress.prefix session.use_strict_mode session.save_handler session.save_path file_uploads cgi.fix_pathinfo"
+# ini keys covered by the interim mitigations (used for the override search)
+MIT_RE='(session\.upload_progress|memory_limit|post_max_size|fatal_error_backtraces)'
+
+to_bytes() { # ini quantity (8M, 1G, 512K, -1, 0) -> bytes; -1 / 0 -> as is
+  local v; v="$(printf '%s' "$1" | tr -d '"'"'"' ;' | tr '[:lower:]' '[:upper:]')"
+  case "$v" in
+    -1|0|"") echo "${v:-}" ;;
+    *[!0-9GMK]*) echo "" ;;
+    *G) echo $(( ${v%G} * 1073741824 )) ;;
+    *M) echo $(( ${v%M} * 1048576 )) ;;
+    *K) echo $(( ${v%K} * 1024 )) ;;
+    *) echo "$v" ;;
+  esac
+}
+
+# Interim mitigations from the PHP advisory (2026-10-21). They reduce exposure,
+# they do NOT fix the bug. Lab note (ORBITRON, unpatched 8.3.35 debug build):
+# only memory_limit=-1 stopped the out-of-memory abort during request parsing
+# for PHP's own regression-test body; post_max_size and upload_progress alone
+# did not. memory_limit=-1 needs a cgroup/container memory limit (DoS risk).
+MIT_TEXT=""; MIT_JSON=""
+mitigation_eval() { # $1=memory_limit $2=post_max_size $3=upload_progress.enabled $4=fatal_error_backtraces $5=version
+  local ml="$1" pms="$2" upe="$3" feb="$4" ver="$5" b m_ml m_pms m_up m_feb
+  [ "$(printf '%s' "$ml" | tr -d '"'"'"' ')" = "-1" ] && m_ml="yes" || m_ml="NO (${ml:-not set, default 128M})"
+  b="$(to_bytes "${pms:-8M}")"
+  if [ -n "$b" ] && [ "$b" != "0" ] && [ "$b" != "-1" ] && [ "$b" -le 33554432 ]; then m_pms="yes (${pms:-8M default})"; else m_pms="NO (${pms:-?})"; fi
+  [ "$(ini_bool "${upe:-On}")" = "Off" ] && m_up="yes" || m_up="NO"
+  case "$(branch_of "$ver")" in
+    8.5) [ "$(ini_bool "${feb:-On}")" = "Off" ] && m_feb="yes" || m_feb="NO" ;;
+    *)   m_feb="n/a" ;;
+  esac
+  MIT_TEXT="memory_limit=-1: $m_ml | post_max_size<=32M: $m_pms | upload_progress off: $m_up | fatal_error_backtraces off (8.5): $m_feb"
+  MIT_JSON="{\"memory_limit_unlimited\":$(json_str "$m_ml"),\"post_max_size_le_32m\":$(json_str "$m_pms"),\"upload_progress_off\":$(json_str "$m_up"),\"fatal_error_backtraces_off\":$(json_str "$m_feb")}"
+}
+
+ini_bool() { # normalise an ini boolean
+  local v; v="$(printf '%s' "$1" | tr -d '"'"'"' ;' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in 1|on|true|yes) echo "On" ;; 0|off|false|no|none|"") echo "Off" ;; *) echo "$1" ;; esac
+}
 
 # normalise phpinfo (text or HTML) to "key => local => master" lines
 phpinfo_norm() {
@@ -383,23 +425,31 @@ report_runtime() { # $1=label $2=binary $3=normalised phpinfo $4=note $5=SAPI di
     kv="$kv$(json_str "$k"):$(json_str "${v:-}"),"
   done
   local upe; upe="$(info_get "$info" "session.upload_progress.enabled")"
-  case "$upe" in
-    On|1)
+  case "$fs|$upe" in
+    patched*) ;;
+    *"|On"|*"|1")
       case "$label" in
         php-fpm*) say "   -> ON in php.ini - pools may override it (see 'Overrides' below). Patch is still required." ;;
-        *)        say "   -> session.upload_progress.enabled is ON (partial mitigation NOT applied; patch is still required)" ;;
+        *)        say "   -> session.upload_progress.enabled is ON (one of the interim mitigations is not applied)" ;;
       esac ;;
+  esac
+  mitigation_eval "$(info_get "$info" "memory_limit")" "$(info_get "$info" "post_max_size")" "$upe" "$(info_get "$info" "fatal_error_backtraces")" "$ver"
+  say "Interim  : $MIT_TEXT"
+  case "$fs" in patched*) ;; *)
+    case "$label:$MIT_TEXT" in php-cli:*) ;; *"memory_limit=-1: yes"*) say "   -> memory_limit=-1 is set: make sure a cgroup/container memory limit (e.g. systemd MemoryMax=) caps this service." ;;
+      *) say "   -> NOT PATCHED and memory_limit is not -1: the key interim mitigation is missing (see README)." ;; esac ;;
   esac
   [ "$branch_state" = "upstream-EOL" ] && say "   -> Branch $br gets no upstream fix. Only a distro backport/ESM, a paid backport or an upgrade closes it."
   runtime_state "$pmode" "$bin" "$ini" "$scandir" "$label"
   say "Running  : $STATE_TEXT"
 
-  RUNTIME_JSON+=("{\"label\":$(json_str "$label"),\"binary\":$(json_str "$bin"),\"version\":$(json_str "$ver"),\"branch\":$(json_str "$br"),\"branch_state\":$(json_str "$branch_state"),\"server_api\":$(json_str "$api"),\"note\":$(json_str "$note"),\"php_ini\":$(json_str "$ini"),\"scan_dir\":$(json_str "$scandir"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"runtime_state\":${STATE_JSON:-null},\"settings\":{${kv%,}}}")
+  RUNTIME_JSON+=("{\"label\":$(json_str "$label"),\"binary\":$(json_str "$bin"),\"version\":$(json_str "$ver"),\"branch\":$(json_str "$br"),\"branch_state\":$(json_str "$branch_state"),\"server_api\":$(json_str "$api"),\"note\":$(json_str "$note"),\"php_ini\":$(json_str "$ini"),\"scan_dir\":$(json_str "$scandir"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"runtime_state\":${STATE_JSON:-null},\"interim_mitigations\":${MIT_JSON:-null},\"settings\":{${kv%,}}}")
 }
 
 say "ORBITRON php2shell exposure checker v$SCRIPT_VERSION  |  $CVES"
 say "Host: $HOSTNAME_S  |  OS: $OS_NAME  |  $NOW"
-[ -n "$FIXED_UPSTREAM" ] || say "NOTE: fixed versions not configured yet (official advisory pending). Fix status relies on package changelogs only."
+if [ -n "$FIXED_UPSTREAM" ]; then say "Fixed upstream versions: $FIXED_UPSTREAM (distro packages: CVE in changelog / vendor advisory)"
+else say "NOTE: no fixed versions configured. Fix status relies on package changelogs only."; fi
 
 for bin in "${BINARIES[@]+"${BINARIES[@]}"}"; do
   raw="$($TIMEOUT "$bin" -i 2>/dev/null)"
@@ -448,30 +498,32 @@ add_override() { # $1=type $2=file:line:text
   say "   [$1] $2"
 }
 hr
-say "Overrides of session.upload_progress.* (pool / web server / per-directory):"
+say "Overrides of session.upload_progress.*, memory_limit, post_max_size, fatal_error_backtraces (pool / web server / per-directory):"
 OV_COUNT=0
 for d in /etc/php/*/fpm/pool.d /etc/php-fpm.d /etc/opt/remi/php*/php-fpm.d /opt/remi/php*/root/etc/php-fpm.d \
          /opt/cpanel/ea-php*/root/etc/php-fpm.d /opt/plesk/php/*/etc/php-fpm.d /usr/local/etc/php-fpm.d \
          /etc/php*/php-fpm.d /opt/alt/php*/etc/php-fpm.d /www/server/php/*/etc/php-fpm.d; do
   [ -d "$d" ] || continue
   while IFS= read -r m; do [ -n "$m" ] && { add_override "fpm-pool" "$m"; OV_COUNT=$((OV_COUNT+1)); }; done \
-    < <(grep -rHnE '^[^;#]*session\.upload_progress' "$d" 2>/dev/null)
+    < <(grep -rHnE "^[^;#]*$MIT_RE" "$d" 2>/dev/null)
 done
 for d in /etc/apache2 /etc/httpd /etc/nginx /usr/local/apache/conf /usr/local/lsws/conf /etc/openlitespeed; do
   [ -d "$d" ] || continue
   while IFS= read -r m; do [ -n "$m" ] && { add_override "webserver" "$m"; OV_COUNT=$((OV_COUNT+1)); }; done \
-    < <(grep -rHnE '^[^#]*session\.upload_progress' "$d" 2>/dev/null)
+    < <(grep -rHnE "^[^#]*$MIT_RE" "$d" 2>/dev/null)
 done
 for w in "${WEBROOTS[@]}"; do
   [ -d "$w" ] || continue
   while IFS= read -r f; do
     while IFS= read -r m; do [ -n "$m" ] && { add_override "per-dir" "$m"; OV_COUNT=$((OV_COUNT+1)); }; done \
-      < <(grep -HnE '^[^;#]*session\.upload_progress' "$f" 2>/dev/null)
+      < <(grep -HnE "^[^;#]*$MIT_RE" "$f" 2>/dev/null)
   done < <(find "$w" -maxdepth 8 \( -name .user.ini -o -name .htaccess \) -type f 2>/dev/null)
 done
 [ "$OV_COUNT" -eq 0 ] && say "   none found (defaults/ini values above apply)"
 say "   Note: .user.ini applies to FPM/CGI only; .htaccess php_flag/php_value to mod_php only;"
 say "         nginx 'fastcgi_param PHP_VALUE' / PHP_ADMIN_VALUE and FPM php_admin_* override php.ini."
+say "         A pool/vhost memory_limit or post_max_size listed here can undo the php.ini mitigation;"
+say "         the advisory says not to rely on .user.ini / ini_set() for these settings."
 
 # --------------------------------------------------------------------------
 # 5. Running processes
@@ -534,10 +586,6 @@ container_name_of() { # $1=container id -> "runtime:name image" or pod/namespace
   return 0
 }
 
-ini_bool() { # normalise an ini boolean
-  local v; v="$(printf '%s' "$1" | tr -d '"'"'"' ;' | tr '[:upper:]' '[:lower:]')"
-  case "$v" in 1|on|true|yes) echo "On" ;; 0|off|false|no|none|"") echo "Off" ;; *) echo "$1" ;; esac
-}
 
 if [ "$SCAN_CONTAINERS" -eq 1 ]; then
   hr
@@ -667,14 +715,20 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
         pools+=("$root"/etc/php/*/fpm/pool.d/*.conf "$root"/etc/php-fpm.d/*.conf "$root"/etc/php[78]*/php-fpm.d/*.conf)
       fi
     fi
-    upe="On"; upsrc="PHP default"; seen=" "; cfgfiles=()
+    upe="On"; upsrc="PHP default"; seen=" "; cfgfiles=(); c_ml=""; c_pms=""; c_feb=""
     for f in "${files[@]}" "${pools[@]+"${pools[@]}"}"; do
       [ -f "$f" ] || continue
       case "$seen" in *" $f "*) continue ;; esac; seen="$seen$f "
       cfgfiles+=("$f")
       v="$(grep -E '^[[:space:]]*(session\.upload_progress\.enabled[[:space:]]*=|php(_admin)?_(value|flag)\[session\.upload_progress\.enabled\][[:space:]]*=)' "$f" 2>/dev/null | tail -n1 | sed 's/^[^=]*=[[:space:]]*//')"
       [ -n "$v" ] && { upe="$(ini_bool "$v")"; upsrc="${f#"$root"}"; }
+      for k in memory_limit post_max_size fatal_error_backtraces; do
+        v="$(grep -E "^[[:space:]]*(${k}[[:space:]]*=|php(_admin)?_(value|flag)\[${k}\][[:space:]]*=)" "$f" 2>/dev/null | tail -n1 | sed 's/^[^=]*=[[:space:]]*//; s/[[:space:]]*;.*$//')"
+        [ -n "$v" ] || continue
+        case "$k" in memory_limit) c_ml="$v" ;; post_max_size) c_pms="$v" ;; *) c_feb="$v" ;; esac
+      done
     done
+    mitigation_eval "$c_ml" "$c_pms" "$upe" "$c_feb" "$ver"
 
     # --- running state of this container's PHP processes
     nm="$(newest_mtime "${cfgfiles[@]+"${cfgfiles[@]}"}")"
@@ -693,8 +747,9 @@ if [ "$SCAN_CONTAINERS" -eq 1 ]; then
     say "      Package  : $pkg ${pver} ${porigin:+[$porigin]}"
     say "      Fix      : $fs"
     say "      upload_progress.enabled: $upe (set in: $upsrc; parsed from files, not executed)"
+    say "      Interim  : $MIT_TEXT"
     say "      Running  : $STATE_TEXT"
-    CONT_JSON+=("{\"container_id\":$(json_str "$cid"),\"name\":$(json_str "$cname"),\"host_pid\":$rep,\"processes\":${#pids[@]},\"binary\":$(json_str "$exe_in"),\"php_object\":$(json_str "$php_obj"),\"version\":$(json_str "$ver"),\"version_source\":$(json_str "$vsrc"),\"branch_state\":$(json_str "$bstate"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"upload_progress_enabled\":$(json_str "$upe"),\"upload_progress_source\":$(json_str "$upsrc"),\"runtime_state\":${STATE_JSON//$root/}}")
+    CONT_JSON+=("{\"container_id\":$(json_str "$cid"),\"name\":$(json_str "$cname"),\"host_pid\":$rep,\"processes\":${#pids[@]},\"binary\":$(json_str "$exe_in"),\"php_object\":$(json_str "$php_obj"),\"version\":$(json_str "$ver"),\"version_source\":$(json_str "$vsrc"),\"branch_state\":$(json_str "$bstate"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"upload_progress_enabled\":$(json_str "$upe"),\"upload_progress_source\":$(json_str "$upsrc"),\"interim_mitigations\":${MIT_JSON:-null},\"runtime_state\":${STATE_JSON//$root/}}")
   done
 fi
 
@@ -706,10 +761,11 @@ if [ "$CONTAINER_EXEC" -eq 1 ]; then
     have "$rt" || continue
     while IFS='|' read -r cid2 cimg; do
       [ -n "$cid2" ] || continue
-      r="$($TIMEOUT "$rt" exec "$cid2" sh -c 'command -v php >/dev/null 2>&1 && php -r "echo PHP_VERSION,\"|\",ini_get(\"session.upload_progress.enabled\");"' 2>/dev/null)"
+      r="$($TIMEOUT "$rt" exec "$cid2" sh -c 'command -v php >/dev/null 2>&1 && php -r "echo PHP_VERSION,\"|\",ini_get(\"session.upload_progress.enabled\"),\"|\",ini_get(\"memory_limit\");"' 2>/dev/null)"
       [ -n "$r" ] || continue
-      say "   [$rt] $cid2 $cimg -> PHP ${r%%|*}, session.upload_progress.enabled=${r#*|}"
-      CONT_JSON+=("{\"exec_runtime\":$(json_str "$rt"),\"container_id\":$(json_str "$cid2"),\"image\":$(json_str "$cimg"),\"version\":$(json_str "${r%%|*}"),\"upload_progress_enabled_cli\":$(json_str "${r#*|}")}")
+      IFS='|' read -r xv xup xml <<< "$r"
+      say "   [$rt] $cid2 $cimg -> PHP $xv, session.upload_progress.enabled=$xup, memory_limit=$xml"
+      CONT_JSON+=("{\"exec_runtime\":$(json_str "$rt"),\"container_id\":$(json_str "$cid2"),\"image\":$(json_str "$cimg"),\"version\":$(json_str "$xv"),\"upload_progress_enabled_cli\":$(json_str "$xup"),\"memory_limit_cli\":$(json_str "$xml")}")
     done < <("$rt" ps --format '{{.ID}}|{{.Image}}' 2>/dev/null)
   done
 fi
@@ -725,9 +781,11 @@ elif [ "$ANY_UNPATCHED" -eq 1 ]; then
   RESULT="php-found-not-confirmed-patched"; RC=2
   say "RESULT: PHP found - at least one runtime is NOT confirmed patched against $CVES."
   [ "$ANY_STALE" -eq 1 ] && say "        ATTENTION: running processes do not use the current config/binary - see 'Running' lines; reload/restart first."
-  say "        Patch as soon as the fix is available for your package source; until then:"
-  say "        session.upload_progress.enabled=0 (partial mitigation only), restrict exposure,"
-  say "        enable the detection rules from the ORBITRON php2shell repository."
+  say "        Update to PHP $FIXED_UPSTREAM (or the vendor package that lists the CVEs) and restart"
+  say "        all PHP workers. Until then (reduces exposure only, see the PHP advisory):"
+  say "        memory_limit=-1 + cgroup/container memory limit, post_max_size=8M (32M with uploads),"
+  say "        session.upload_progress.enabled=0, fatal_error_backtraces=0 (8.5) - in php.ini / pool /"
+  say "        server config (not .user.ini / ini_set), then restart workers; enable the detection rules."
 else
   RESULT="php-found-all-confirmed-patched"; RC=1
   say "RESULT: PHP found - all runtimes confirmed patched (by changelog/upstream version)."

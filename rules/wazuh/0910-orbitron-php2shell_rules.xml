@@ -79,6 +79,27 @@
     <mitre><id>T1190</id></mitre>
   </rule>
 
+  <!-- PHP hit memory_limit while parsing the request (before the script ran): php2shell trigger condition.
+       Fixed in PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12; patched PHP still logs it but stops cleanly. -->
+  <rule id="109627" level="10">
+    <match type="pcre2">Allowed memory size of \d+ bytes exhausted.* in (&lt;b&gt;)?Unknown(&lt;/b&gt;)? on line (&lt;b&gt;)?0\b</match>
+    <description>php2shell: PHP ran out of memory while parsing the request (trigger condition)</description>
+    <mitre><id>T1190</id></mitre>
+  </rule>
+
+  <rule id="109628" level="14" timeframe="120">
+    <if_sid>109625</if_sid>
+    <if_matched_sid>109627</if_matched_sid>
+    <description>php2shell: PHP worker crash shortly after an out-of-memory during request parsing - likely exploitation attempt</description>
+    <mitre><id>T1190</id></mitre>
+  </rule>
+
+  <rule id="109629" level="12" frequency="5" timeframe="300">
+    <if_matched_sid>109627</if_matched_sid>
+    <description>php2shell: repeated out-of-memory during request parsing (5 in 5 min)</description>
+    <mitre><id>T1190</id></mitre>
+  </rule>
+
 </group>
 
 <group name="php2shell,windows,sysmon,">

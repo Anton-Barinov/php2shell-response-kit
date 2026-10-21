@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  ORBITRON php2shell exposure checker (Windows)   v1.1.0 (2026-10-21)
+  ORBITRON php2shell exposure checker (Windows)   v1.3.0 (2026-10-21)
   CVE-2026-109618 / CVE-2026-109619 ("php2shell")
 
 .DESCRIPTION
@@ -10,6 +10,8 @@
     - php.exe / php-cgi.exe found in common install paths, PATH, running
       processes, IIS FastCGI configuration and Apache (XAMPP/WAMP) configs
     - effective session.upload_progress.* and related settings per runtime
+    - the interim mitigations from the PHP advisory (memory_limit=-1, post_max_size,
+      session.upload_progress.enabled=0, fatal_error_backtraces=0 on 8.5)
       (evaluated with the same php.ini / -c / PHPRC that IIS FastCGI uses)
     - per-directory overrides (.user.ini / .htaccess) under IIS site roots
       and given web roots, plus "-d" overrides in FastCGI arguments
@@ -50,13 +52,12 @@ $ErrorActionPreference = 'Continue'
 $PhpPath = @($PhpPath | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $WebRoot = @($WebRoot | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
-$ScriptVersion   = '1.1.0'
+$ScriptVersion   = '1.3.0'
 $Cves            = @('CVE-2026-109618', 'CVE-2026-109619')
-# EMPTY until the official PHP advisory is published (2026-10-21 14:00 UTC).
-# Fill ONLY from https://www.php.net/ , e.g. '8.2.35 8.3.36 8.4.27 8.5.12'
-$FixedUpstream   = if ($env:PHP2SHELL_FIXED_UPSTREAM) { $env:PHP2SHELL_FIXED_UPSTREAM } else { '' }
+# Fixed versions from the official PHP security release of 2026-10-21 (https://www.php.net/).
+$FixedUpstream   = if ($env:PHP2SHELL_FIXED_UPSTREAM) { $env:PHP2SHELL_FIXED_UPSTREAM } else { '8.2.35 8.3.36 8.4.27 8.5.12' }
 $SupportedBranch = @('8.2', '8.3', '8.4', '8.5')
-$Keys = @('session.upload_progress.enabled', 'session.upload_progress.cleanup', 'session.upload_progress.name',
+$Keys = @('memory_limit', 'post_max_size', 'fatal_error_backtraces', 'session.upload_progress.enabled', 'session.upload_progress.cleanup', 'session.upload_progress.name',
           'session.upload_progress.prefix', 'session.use_strict_mode', 'session.save_handler',
           'session.save_path', 'file_uploads', 'cgi.fix_pathinfo')
 
@@ -99,6 +100,27 @@ function ConvertFrom-PhpInfo([string]$Raw) {
     }
   }
   return $h
+}
+
+$MitPattern = 'session\.upload_progress|memory_limit|post_max_size|fatal_error_backtraces'
+
+function ConvertTo-Bytes([string]$v) {
+  $v = ($v -replace '["'' ;]', '').ToUpperInvariant()
+  if ($v -match '^-?\d+$') { return [int64]$v }
+  if ($v -match '^(\d+)([KMG])$') { return [int64]$Matches[1] * @{K = 1KB; M = 1MB; G = 1GB}[$Matches[2]] }
+  return $null
+}
+
+# Interim mitigations (PHP advisory 2026-10-21). They reduce exposure only.
+function Get-Mitigations([hashtable]$s, [string]$ver) {
+  $ml = [string]$s['memory_limit']; $pms = [string]$s['post_max_size']
+  $mMl = if (($ml -replace '["'' ]', '') -eq '-1') { 'yes' } else { "NO ($(if ($ml) { $ml } else { 'not set, default 128M' }))" }
+  $b = ConvertTo-Bytes $(if ($pms) { $pms } else { '8M' })
+  $mPms = if ($b -and $b -gt 0 -and $b -le 32MB) { "yes ($(if ($pms) { $pms } else { '8M default' }))" } else { "NO ($pms)" }
+  $mUp = if ([string]$s['session.upload_progress.enabled'] -match '^(Off|0|)$' -and $s['session.upload_progress.enabled']) { 'yes' } else { 'NO' }
+  $mFeb = 'n/a'
+  if ((Get-Branch $ver) -eq '8.5') { $mFeb = if ([string]$s['fatal_error_backtraces'] -match '^(Off|0)$') { 'yes' } else { 'NO' } }
+  return [ordered]@{ memory_limit_unlimited = $mMl; post_max_size_le_32m = $mPms; upload_progress_off = $mUp; fatal_error_backtraces_off = $mFeb }
 }
 
 function Get-Branch([string]$v) { if ($v -match '^(\d+\.\d+)') { $Matches[1] } else { '' } }
@@ -158,7 +180,7 @@ if ($IsWin -and $appHost -and (Test-Path -LiteralPath $appHost)) {
       $argStr = [string]$a.arguments
       Add-Target -Exe $a.fullPath -ArgStr $argStr -EnvVars $envs -Source 'IIS FastCGI'
       $fcgiMonitor[(Expand-Path $a.fullPath).ToLowerInvariant()] = [string]$a.monitorChangesTo
-      if ($argStr -match 'session\.upload_progress') { [void]$fastCgiOverrides.Add("IIS FastCGI arguments: $($a.fullPath) $argStr") }
+      if ($argStr -match $MitPattern) { [void]$fastCgiOverrides.Add("IIS FastCGI arguments: $($a.fullPath) $argStr") }
     }
     foreach ($vd in $x.SelectNodes('//sites/site/application/virtualDirectory')) {
       $pp = Expand-Path $vd.physicalPath
@@ -188,7 +210,7 @@ foreach ($c in $apacheConfs) {
   foreach ($l in ($txt | Where-Object { $_ -match '^\s*DocumentRoot\s+"?([^"]+)"?' })) {
     if ($l -match '^\s*DocumentRoot\s+"?([^"]+)"?' -and (Test-Path -LiteralPath $Matches[1])) { [void]$siteRoots.Add($Matches[1]) }
   }
-  foreach ($l in ($txt | Select-String -Pattern 'session\.upload_progress')) {
+  foreach ($l in ($txt | Select-String -Pattern $MitPattern)) {
     [void]$fastCgiOverrides.Add("Apache config: $($c.FullName):$($l.LineNumber): $($l.Line.Trim())")
   }
 }
@@ -299,7 +321,7 @@ $hostName = [Environment]::MachineName
 $osName = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { [Environment]::OSVersion.VersionString }
 $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 Say "Host: $hostName  |  OS: $osName  |  $now"
-if (-not $FixedUpstream) { Say 'NOTE: fixed versions not configured yet (official advisory pending).' }
+if ($FixedUpstream) { Say "Fixed upstream versions: $FixedUpstream" } else { Say 'NOTE: no fixed versions configured.' }
 
 $runtimes = New-Object System.Collections.ArrayList
 $anyUnpatched = $false
@@ -328,8 +350,11 @@ foreach ($t in $targets) {
   Say "Fix      : $fs"
   if (-not $raw) { Say '   WARNING: could not run phpinfo (-i); settings unknown' }
   foreach ($k in $Keys) { Say ('   {0,-34} {1}' -f $k, $(if ($settings[$k]) { $settings[$k] } else { '<not set>' })) }
-  if ($settings['session.upload_progress.enabled'] -match '^(On|1)$') {
-    Say '   -> session.upload_progress.enabled is ON (partial mitigation NOT applied; patch is still required)'
+  $mit = Get-Mitigations $settings $ver
+  Say ("Interim  : memory_limit=-1: {0} | post_max_size<=32M: {1} | upload_progress off: {2} | fatal_error_backtraces off (8.5): {3}" -f $mit.memory_limit_unlimited, $mit.post_max_size_le_32m, $mit.upload_progress_off, $mit.fatal_error_backtraces_off)
+  if ($fs -notlike 'patched*') {
+    if ($mit.memory_limit_unlimited -eq 'yes') { Say '   -> memory_limit=-1 is set: cap the process memory (IIS application pool private memory limit / Job Object).' }
+    else { Say '   -> NOT PATCHED and memory_limit is not -1: the key interim mitigation is missing (see README).' }
   }
   if ($branchState -eq 'upstream-EOL') { Say "   -> Branch $br gets no upstream fix: upgrade to a supported branch." }
   $state = Get-RuntimeState -Exe $t.Exe -Source $t.Source -Ini $info['Loaded Configuration File'] -ScanDir $info['Scan this dir for additional .ini files']
@@ -340,7 +365,7 @@ foreach ($t in $targets) {
   [void]$runtimes.Add([ordered]@{
     binary = $t.Exe; arguments = $t.Args; source = $t.Source; version = $ver; branch = $br
     branch_state = $branchState; server_api = $info['Server API']; php_ini = $info['Loaded Configuration File']
-    fix_status = $fs; runtime_state = $state; settings = $settings
+    fix_status = $fs; runtime_state = $state; interim_mitigations = $mit; settings = $settings
   })
 }
 
@@ -348,14 +373,14 @@ foreach ($t in $targets) {
 # 3. Per-directory and launcher overrides
 # ----------------------------------------------------------------------------
 Hr
-Say 'Overrides of session.upload_progress.* (FastCGI args / Apache config / per-directory):'
+Say 'Overrides of session.upload_progress.*, memory_limit, post_max_size, fatal_error_backtraces (FastCGI args / Apache config / per-directory):'
 $overrides = New-Object System.Collections.ArrayList
 foreach ($o in $fastCgiOverrides) { [void]$overrides.Add($o); Say "   $o" }
 $roots = @($siteRoots) + @($WebRoot) + @('C:\inetpub\wwwroot', 'C:\xampp\htdocs') | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 foreach ($r in $roots) {
   $files = @(Get-ChildItem -LiteralPath $r -Recurse -Depth 8 -Force -File -Include '.user.ini', '.htaccess' -ErrorAction SilentlyContinue)
   foreach ($f in $files) {
-    foreach ($m in @(Select-String -LiteralPath $f.FullName -Pattern '^[^;#]*session\.upload_progress' -ErrorAction SilentlyContinue)) {
+    foreach ($m in @(Select-String -LiteralPath $f.FullName -Pattern "^[^;#]*($MitPattern)" -ErrorAction SilentlyContinue)) {
       $s = "$($f.FullName):$($m.LineNumber): $($m.Line.Trim())"
       [void]$overrides.Add($s); Say "   [per-dir] $s"
     }
@@ -363,6 +388,7 @@ foreach ($r in $roots) {
 }
 if ($overrides.Count -eq 0) { Say '   none found (php.ini values above apply)' }
 Say '   Note: .user.ini applies to php-cgi (IIS FastCGI); .htaccess php_flag to Apache mod_php only.'
+Say '         The advisory says not to rely on .user.ini / ini_set() for the mitigation settings.'
 
 # ----------------------------------------------------------------------------
 # 4. Processes
@@ -384,9 +410,10 @@ if ($runtimes.Count -eq 0) {
   $result = 'php-found-not-confirmed-patched'; $rc = 2
   Say "RESULT: PHP found - at least one runtime is NOT confirmed patched against $($Cves -join ' ')."
   if ($anyStale) { Say "        ATTENTION: running processes do not use the current php.ini/binary - see 'Running' lines; recycle/restart first." }
-  Say '        Replace PHP with the fixed build as soon as it is published on windows.php.net;'
-  Say '        until then: session.upload_progress.enabled=0 (partial mitigation only),'
-  Say '        restrict exposure and enable the ORBITRON php2shell detection rules.'
+  Say "        Replace PHP with the fixed build ($FixedUpstream, windows.php.net) and recycle/restart."
+  Say '        Until then (reduces exposure only): memory_limit=-1 with a process memory cap, post_max_size=8M'
+  Say '        (32M with uploads), session.upload_progress.enabled=0, fatal_error_backtraces=0 (8.5) in php.ini'
+  Say '        or FastCGI/Apache config (not .user.ini / ini_set); enable the ORBITRON detection rules.'
 } else {
   $result = 'php-found-all-confirmed-patched'; $rc = 1
   Say 'RESULT: PHP found - all runtimes confirmed patched (upstream version).'

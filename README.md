@@ -1,39 +1,47 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON response kit
 
-> **Status: v1.2.3 — PRE-DISCLOSURE (2026-10-21 14:55 TRT / 11:55 UTC).**
-> The official PHP advisory with technical details, affected and fixed versions is scheduled for
-> **2026-10-21 14:00 UTC (17:00 TRT)**. This repository will be updated after the release.
-> Everything marked *reported* or *unconfirmed* below may change. Check [CHANGELOG.md](CHANGELOG.md).
+> **Status: v1.3.0 — FIXES RELEASED (2026-10-21).** PHP published **8.5.12, 8.4.27, 8.3.36 and 8.2.35**.
+> Scripts now know the fixed versions and check the interim mitigations from the PHP advisory; new rules
+> for the trigger condition. Sections marked *pre-disclosure* are kept for the record. See [CHANGELOG.md](CHANGELOG.md).
 >
 > Türkçe sürüm: [README.tr.md](README.tr.md)
 
 ## TL;DR
 
-* Two critical remote code execution bugs in PHP core, both rated CVSS v4.0 9.2 by the PHP security team.
-  Details leaked early; the fix ships on **21 Oct 2026, 14:00 UTC** (or earlier if exploitation starts).
-* Public PoC/exploit: none confirmed. Several "exploit" repositories appeared on GitHub on 21 Oct —
-  **unverified, do not run them outside an isolated lab.**
-* **Patching is the only fix.** `session.upload_progress.enabled=0` is, according to its own authors'
-  update, only a *partial* mitigation.
-* Detection before disclosure can only be **behavioural** (post-exploitation). This kit gives you
-  inventory scripts and rules for Sigma, Splunk, QRadar, CrowdStrike Falcon, SentinelOne, Wazuh,
-  YARA and ModSecurity — all clearly labelled with what they do and do not cover.
+* Two critical, unauthenticated remote code execution bugs in PHP core (CVSS v4.0 9.2 each).
+  **Fixed in PHP 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35** (21 Oct 2026). PHP 8.1 and older: no upstream fix.
+* **Root cause (from the official fix):** when `memory_limit` is reached **while PHP parses the request**
+  (POST / multipart / upload data — before any script runs), PHP aborts and leaves request state
+  half-initialised (CVE-2026-109618) or stale for the **next request on the same worker** (CVE-2026-109619).
+  Any reachable `.php` file is enough; mod_php is the highest-risk SAPI, PHP-FPM is affected too.
+* **Update and restart all PHP workers — that is the only complete fix.**
+* Interim mitigations from the PHP advisory (reduce exposure only): `memory_limit = -1` **plus a
+  cgroup/container memory limit**, `post_max_size = 8M` (32M if uploads are needed),
+  `session.upload_progress.enabled = 0`, `fatal_error_backtraces = 0` (8.5). In our lab only
+  `memory_limit = -1` stopped the abort for PHP's own regression-test request (§9).
+* This kit: inventory scripts (fixed-version + mitigation check, containers included) and rules for Sigma,
+  Splunk, QRadar, CrowdStrike Falcon, SentinelOne, Wazuh, YARA and ModSecurity — each labelled with what
+  was tested.
 
 ## 1. What happened?
 
 | Item | Status |
 |---|---|
-| Two critical PHP security bugs, CVSS v4.0 9.2 each, release 21 Oct 2026 14:00 UTC | **Confirmed** by php.net (advance notice of 20 Oct) |
+| Fixed releases 8.5.12, 8.4.27, 8.3.36, 8.2.35 (21 Oct 2026) | **Confirmed** — php.net release announcements |
+| CVE-2026-109618 = GHSA-w8hw-w9fx-j79w, CVE-2026-109619 = GHSA-6wmf-4rv5-p3rp | **Confirmed** — PHP NEWS and fix commit "Avoid state corruption via bailout" |
+| Bug class: state corruption after an out-of-memory abort during request start-up / request parsing; stale request state reused by the next request | **Confirmed** — php.net advisory text and the fix (OOM bailout replaced by unwinding; globals reset; parser stops at the soft limit) |
+| mod_php highest risk; unauthenticated, before application code runs | **Confirmed** — php.net |
+| Two critical PHP security bugs, CVSS v4.0 9.2 each | **Confirmed** by php.net (advance notice of 20 Oct) |
 | Bug class: remote code execution in PHP core, unauthenticated | Reported by watchTowr (reproduced CVE-2026-109618) and others; PHP has not published details |
 | CVE IDs CVE-2026-109618 / CVE-2026-109619 | From watchTowr and the leaked material; the php.net notice does not name them; records are reserved |
 | Nickname "php2shell", exploit tool "PHP2Shell" claiming PHP ≥ 5.4 | Reported (screenshot leak) — unconfirmed |
 | Affected versions "PHP 5 through 8" | Reported — **unconfirmed** |
 | Fixes for supported branches only (8.2, 8.3, 8.4, 8.5) | Reported; consistent with PHP's support policy |
-| Link to *Session Upload Progress* (`ext/session`), memory corruption | GMO Flatt Security's assessment, *conditional on* their own research matching php2shell |
+| Link to *Session Upload Progress* (`ext/session`), memory corruption | Pre-disclosure assessment by GMO Flatt Security. **The fix shows it is one path, not the cause**: it also hardens the upload-progress handler (no class resolution / user code before request start-up, no leftover `$_SESSION`) |
 | Exploitation in the wild | None reported as of 21 Oct morning (watchTowr, Huntress) |
 
 Timeline: 20 Oct ~15:20 UTC a Hacker News post leaks the upcoming disclosure → 20 Oct 19:33 UTC PHP
-publishes the advance notice → 21 Oct 14:00 UTC scheduled release.
+publishes the advance notice → 21 Oct: fixed releases and advisory on php.net.
 
 ## 2. Why it matters
 
@@ -48,12 +56,12 @@ publishes the advance notice → 21 Oct 14:00 UTC scheduled release.
 
 ## 3. Affected systems — what we know now
 
-| Runtime | Expected situation (pending advisory) |
+| Runtime | Situation (21 Oct) |
 |---|---|
-| PHP 8.2 / 8.3 / 8.4 / 8.5 from php.net, Remi, deb.sury.org, official Docker images, Windows builds | Upstream fix expected 21 Oct 14:00 UTC |
+| PHP 8.2 / 8.3 / 8.4 / 8.5 from php.net, Remi, deb.sury.org, official Docker images, Windows builds | **Fixed upstream in 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12** — repackaged builds follow |
 | PHP 8.1 and older (upstream EOL) | **No upstream fix.** Only distribution/ESM/vendor backports or an upgrade |
 | Distribution packages (RHEL/Rocky/Alma, Debian, Ubuntu, SUSE) | Fix arrives via the distribution's security process — timing differs, see §7 |
-| All SAPIs (mod_php, PHP-FPM, CGI/FastCGI, LiteSpeed) | Reported reproductions include mod_php and php-fpm with WordPress/Laravel/Symfony (per Flatt Security's summary of the researcher post) |
+| All SAPIs (mod_php, PHP-FPM, CGI/FastCGI, LiteSpeed) | php.net: mod_php highest risk. Persistent workers (mod_php, FPM, LiteSpeed) carry stale state between requests; per-request CGI processes do not reuse it |
 
 ## 4. What to check (use the scripts)
 
@@ -77,10 +85,13 @@ powershell -ExecutionPolicy Bypass -File .\php2shell-check.ps1 -OutFile report.j
 Exit codes: `0` no PHP, `1` PHP found and all runtimes confirmed patched, `2` PHP found and at least
 one runtime **not confirmed** patched.
 
-After the advisory is published set the fixed versions (only from php.net):
-`PHP2SHELL_FIXED_UPSTREAM="8.2.x 8.3.x 8.4.x 8.5.x"` (Linux env var / Windows env var). The Linux script
-does **not** apply upstream version comparison to distribution packages that backport fixes
-(RHEL/Ubuntu keep old version numbers) — for those it relies on the package changelog listing the CVE.
+Since v1.3.0 the fixed versions **8.2.35 8.3.36 8.4.27 8.5.12** are built in (override with
+`PHP2SHELL_FIXED_UPSTREAM`). The Linux script does **not** apply upstream version comparison to
+distribution packages that backport fixes (RHEL/Ubuntu keep old version numbers) — for those it relies on
+the package changelog listing the CVE. Each runtime also gets an `Interim:` line (JSON
+`interim_mitigations`) showing which of the four advisory settings are in effect, and the override list
+now includes pool / vhost / per-directory `memory_limit` and `post_max_size` values, which can silently
+undo a php.ini mitigation.
 
 Checklist:
 1. Inventory every PHP runtime **and the SAPI the web server actually uses** (CLI values ≠ FPM values).
@@ -94,19 +105,34 @@ Checklist:
 
 ## 5. Known workarounds — current status
 
-| Workaround | Status (21 Oct, 10:30 TRT) | Notes |
+PHP's advisory lists these interim mitigations. **They reduce exposure; they do not make an installation
+safe.** Set them in php.ini, the FPM pool (`php_admin_value` / `php_admin_flag`) or the web-server config
+— **not** with `ini_set()` or `.user.ini` — and **restart all PHP workers**.
+
+```ini
+memory_limit = -1                      ; FPM: php_admin_value[memory_limit] = -1 (apps cannot override)
+post_max_size = 8M                     ; 32M if file uploads are required
+session.upload_progress.enabled = 0
+fatal_error_backtraces = 0             ; PHP 8.5 only
+```
+
+| Workaround | Status (21 Oct, after release) | Notes |
 |---|---|---|
-| `session.upload_progress.enabled = 0` | **Partial mitigation only.** Flatt Security, who proposed it, updated their post: attack is expected to remain possible. PHP core developers are quoted as saying INI settings alone will not protect. One analysis claims it covers only one of the two bugs. | Low cost: uploads keep working, only progress tracking stops. It is `INI_PERDIR`: set in php.ini, FPM pool (`php_admin_flag`), Apache `php_admin_flag` — **not** via `ini_set()`. Verify the effective value per SAPI with the script. |
-| `session.use_strict_mode = 1` | **Not a mitigation for this mechanism** (our lab, see §9) | Still good hygiene. |
-| WAF rule on the `PHP_SESSION_UPLOAD_PROGRESS` multipart field | **Hunting / one vector only** | Lab-tested ModSecurity rules in `rules/modsecurity/`. Blocking variant is disabled by default. |
+| `memory_limit = -1` | **Key interim mitigation** (php.net). In our lab the only setting that stopped the out-of-memory abort during parsing (§9) | **Creates a DoS risk**: a few-MB request can cost hundreds of MB to parse. Cap memory with a cgroup/container limit (systemd `MemoryMax=` on php-fpm/httpd, container memory limit, IIS app-pool private memory limit) and size `pm.max_children` accordingly. php.net: use cgroups, **not** `RLIMIT_AS` / `RLIMIT_DATA`. |
+| `post_max_size = 8M` (32M with uploads) | Supporting (php.net) | 8M is the PHP default. **Alone it did not stop** the abort in our lab: a 3 MB body exhausted 128M. |
+| `session.upload_progress.enabled = 0` | Supporting (php.net); removes one amplifier | **Alone it did not stop** the abort in our lab. `INI_PERDIR`: php.ini, FPM `php_admin_flag`, Apache `php_admin_flag`. |
+| `fatal_error_backtraces = 0` | PHP 8.5 only (php.net) | Restart workers afterwards. |
+| `session.use_strict_mode = 1` | **Not a mitigation** (our lab, §9) | Still good hygiene. |
+| WAF / ModSecurity | **Hunting + body limits** | The recommended `SecRequestBodyNoFilesLimit 131072` + `SecRequestBodyLimitAction Reject` rejected PHP's regression-test body in our lab. Rules 9109622/23 log part-header floods and body errors. |
 | Restrict exposure (VPN/IP allow-list, take admin panels offline, isolate EOL hosts) | Effective risk reduction | CERT-EU advises isolating internet-facing applications until fixed. |
 | Least privilege for the PHP user, egress filtering, read-only web roots | Limits impact | Recommended by Flatt Security; also reduces webshell persistence. |
-| Patch | **The fix** | 21 Oct 14:00 UTC upstream; distribution timing see §7. |
+| Patch | **The fix** | 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 upstream; distribution timing see §7. Restart workers. |
 
 ## 6. Detection & monitoring rules
 
-No exploit signature can be written before the patch diff is public. The rules below detect what an
-attacker does *after* PHP code execution, plus hunting signals around the suspected mechanism.
+Since the fix is public, there are two kinds of rules here: **trigger-condition** rules (PHP ran out of
+memory while parsing a request — the state the bug needs — and part-header floods at the WAF), and
+**behavioural** rules for what an attacker does *after* code execution.
 **All SIEM/EDR queries are UNTESTED on live platforms** (generated with pySigma from the Sigma sources);
 YARA, ModSecurity and the scripts were tested in our lab. Baseline 1–2 h before alerting.
 
@@ -116,13 +142,19 @@ YARA, ModSecurity and the scripts were tested in our lab. Baseline 1–2 h befor
 | Linux: reverse-shell / recon command line from PHP | `lnx_..._suspicious_cmdline.yml` | ✓ | ✓ | ✓ | ✓ | 109613 | — |
 | Windows: php-cgi/php/httpd/w3wp spawns shell/LOLBin | `win_..._spawns_shell_or_lolbin.yml` | ✓ | ✓ | ✓ | ✓ | 109620 (Sysmon) | — |
 | Webshell / `.user.ini` / `.htaccess` written to web root | `lnx_/win_..._file_written_to_webroot.yml` | ✓ | ✓ | use Falcon built-in webshell detections | ✓ | 109615, 109616, 109621 | YARA |
+| **PHP out of memory while parsing the request** (`Allowed memory size … in Unknown on line 0`) — trigger condition | `php2shell_php_oom_during_request_parsing.yml` | ✓ | payload | ✓ (needs log ingestion) | — | 109627, 109629 (burst) | — |
+| **Out-of-memory during parsing followed by a worker crash within 2 min** | — | — | — | — | — | 109628 (level 14) | — |
 | PHP worker crash (SIGSEGV/SIGABRT) — memory-corruption attempts | `php2shell_php_worker_crash.yml` | ✓ | payload | ✓ (needs log ingestion) | — | 109625, 109626 | — |
+| Multipart part-header flood / request-body errors | — | — | — | — | — | — | ModSecurity 9109622, 9109623 |
 | Upload-progress field in multipart requests | — | — | — | — | — | — | ModSecurity 9109618/19/21 (+ blocking 9109620) |
 | Webshells, auto_prepend persistence, upload-progress session leftovers | — | — | — | — | — | — | YARA `rules/yara/` |
 
 Data requirements: process creation with parent image (Sysmon for Linux/Windows, auditd `execve`,
 EDR), file creation telemetry for the web-root rules, PHP-FPM/Apache error logs for the crash rule,
-request-body inspection for ModSecurity. Platform notes:
+request-body inspection for ModSecurity. The out-of-memory rule needs PHP errors in a forwarded log
+(`log_errors=On`; for FPM `catch_workers_output=yes` or a pool `error_log`). On patched hosts the message
+can still appear (PHP now stops cleanly) — treat it as an attempt indicator, not as a compromise.
+Platform notes:
 
 * **Splunk** — `.spl` uses Sysmon field names (`Image`, `ParentImage`, `CommandLine`), `.cim.spl` uses the CIM Endpoint data model.
 * **QRadar** — field-based `.aql` needs Sysmon/EDR custom properties (*Parent Process Path*, *Command*); Linux OS DSM (auditd) usually lacks parent process → use `.payload.aql` or the Wazuh/auditd approach.
@@ -154,17 +186,40 @@ In every case: **restart PHP-FPM / Apache / IIS app pools** after updating and r
 
 ## 8. Recommended plan for today
 
-1. Now: run the inventory scripts, list internet-facing PHP, EOL branches and package sources.
-2. Now: enable the behavioural rules (process, file, crash) in your SIEM/EDR; enable ModSecurity rules in log mode.
-3. Now: set `session.upload_progress.enabled=0` where progress bars are not used — as risk reduction, not as a fix.
-4. Now: ask hosting/panel/appliance vendors and distribution channels for their release plan.
-5. 14:00 UTC: read the advisory, set `PHP2SHELL_FIXED_UPSTREAM`, patch upstream-tracking hosts first, restart services.
-6. Until distribution packages arrive: restrict exposure of RHEL/Ubuntu-packaged PHP, watch the rules closely.
-7. Afterwards: hunt for webshells (YARA), new `.user.ini`/`.htaccess`, new cron jobs and accounts on hosts that were exposed.
+1. Run the v1.3.0 scripts: list runtimes that are `NOT PATCHED` / `NOT CONFIRMED`, their `Interim:` line and package source.
+2. Upstream-tracking hosts (php.net, Remi, Sury, official images, Windows): update to 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12, **restart** FPM / Apache / IIS app pools, rebuild **and redeploy** images. Re-run the script (`Running: LOADED`).
+3. Distribution packages (RHEL/Rocky/Alma, Ubuntu): until the vendor package lists the CVEs, apply the interim mitigations **with** a cgroup memory limit, and restrict exposure.
+4. Enable the out-of-memory and crash rules (Wazuh 109627–109629, Sigma), ModSecurity body limits + 9109622 in log mode, and the behavioural rules.
+5. Hunt on hosts that were exposed: `in Unknown on line 0` out-of-memory errors and worker crashes since 20 Oct, webshells (YARA), new `.user.ini`/`.htaccess`, cron jobs and accounts.
+6. Upstream-EOL branches (≤ 8.1): upgrade, vendor/ESM backport, or isolate.
 
-## 9. Lab notes (ORBITRON, Ubuntu 24.04, PHP 8.3.6, mod_php and built-in server)
+## 9. Lab notes
 
-We tested the *mechanism* Flatt Security points to — not the vulnerability:
+### 9a. Patch analysis (21 Oct, after release) — official fix and regression tests only
+
+Method: diff of `php-8.3.35..php-8.3.36` (fix commit `3c832b523e`, "Avoid state corruption via bailout",
+same fix on all four branches); PHP's **own** new `.phpt` regression tests run against debug + ASan builds
+of unpatched 8.3.35 and patched 8.3.36 (php-cgi). No exploit code was written or used.
+
+* What the fix changes: an out-of-memory during request start-up no longer `longjmp`s out of half-built
+  state; the request parser (`main/rfc1867.c`, `main/php_variables.c`, `main/SAPI.c`) checks a soft limit and
+  stops cleanly; globals that could survive into the next request are reset (`$_GET/$_POST/...` slots,
+  last error, module state); the multipart parser keeps only `Content-Disposition` / `Content-Type` part
+  headers and ignores duplicates; the upload-progress handler no longer resolves classes or runs user code
+  (`__wakeup`, autoload) before request start-up and no longer leaves `$_SESSION` behind in scripts that
+  never call `session_start()`.
+* Unpatched 8.3.35: 5 of 27 applicable new tests fail (two multipart part-header flood tests →
+  out-of-memory during parsing; three upload-progress session tests). Patched 8.3.36: 27/27 pass.
+* Interim mitigations against PHP's regression-test body (one field, 600,000 header lines, 3 MB), unpatched
+  8.3.35 php-cgi: default settings → `Allowed memory size of 134217728 bytes exhausted … in Unknown on line 0`;
+  `post_max_size=8M` → same; `session.upload_progress.enabled=0` → same; `memory_limit=-1` → request
+  completes (≈218 MB peak in the debug build). Patched 8.3.36 with default settings: ≈2 MB peak.
+* Limits of this test: debug + ASan builds (memory accounting differs from release builds); single-request
+  CGI — the cross-request reuse (CVE-2026-109619) in persistent workers was not reproduced.
+
+### 9b. Pre-disclosure: upload-progress mechanism (Ubuntu 24.04, PHP 8.3.6, mod_php and built-in server)
+
+We tested the *mechanism* Flatt Security pointed to — not the vulnerability:
 * A multipart request containing a field named `PHP_SESSION_UPLOAD_PROGRESS` made PHP create a session
   file **even though the target script never calls `session_start()`**, using the session ID chosen by
   the client (`session.use_strict_mode=Off`).
@@ -175,9 +230,14 @@ We tested the *mechanism* Flatt Security points to — not the vulnerability:
 * A request to a non-existent `.php` path (404) did not trigger it — any *reachable* PHP script does.
 * ModSecurity 2.9: log rules fired only for multipart requests carrying the field; normal uploads were
   not flagged; the blocking variant returned 403.
+* ModSecurity 2.9.7 (v1.3.0): 9109622 fired for multipart requests with 1,000 part-header lines (file and
+  non-file parts), not for a normal upload; PHP's 3 MB regression-test body was rejected (HTTP 400) by the
+  recommended body-limit configuration before it reached PHP.
 
 ## 10. References
 
+* PHP — security releases 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 (21 Oct 2026): https://www.php.net/archive/2026.php#2026-10-21-1
+* PHP source — fix commit "Avoid state corruption via bailout" (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp): https://github.com/php/php-src/commit/3c832b523ee13b1a010177d2ff84aea18be0015e
 * PHP — Upcoming Critical PHP Security Release (20 Oct 2026): https://www.php.net/archive/2026.php#2026-10-20-1
 * GMO Flatt Security — php2shell overview and guidance (JA, updated 21 Oct): https://blog.flatt.tech/entry/php2shell
 * Sansec — Critical PHP RCE: https://sansec.io/research/php2shell

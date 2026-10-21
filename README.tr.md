@@ -1,39 +1,47 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON müdahale kiti
 
-> **Durum: v1.2.3 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 14:55 TSİ / 11:55 UTC).**
-> Teknik detayları, etkilenen ve düzeltilmiş sürümleri içeren resmi PHP duyurusu
-> **21.10.2026 17:00 TSİ (14:00 UTC)** için planlandı. Sürüm çıktıktan sonra bu repo güncellenecek.
-> Aşağıda *bildirilen* veya *doğrulanmamış* olarak işaretlenen her şey değişebilir. Değişiklikler: [CHANGELOG.md](CHANGELOG.md).
+> **Durum: v1.3.0 — YAMALAR YAYINLANDI (21.10.2026).** PHP **8.5.12, 8.4.27, 8.3.36 ve 8.2.35** sürümlerini yayınladı.
+> Script'ler artık düzeltilmiş sürümleri biliyor ve PHP duyurusundaki geçici önlemleri kontrol ediyor; tetikleme
+> koşulu için yeni kurallar eklendi. *Açıklama öncesi* bölümler kayıt için korunuyor. Değişiklikler: [CHANGELOG.md](CHANGELOG.md).
 >
 > English version: [README.md](README.md)
 
 ## Özet
 
-* PHP çekirdeğinde iki kritik uzaktan kod çalıştırma (RCE) açığı var; PHP güvenlik ekibi ikisini de
-  CVSS v4.0 9.2 olarak puanladı. Detaylar erken sızdı; yama **21 Ekim 17:00 TSİ**'de (istismar başlarsa daha erken) yayınlanacak.
-* Doğrulanmış public PoC/exploit yok. 21 Ekim'de GitHub'da "exploit" adlı çok sayıda repo açıldı —
-  **doğrulanmamış, izole lab dışında çalıştırmayın.**
-* **Tek gerçek çözüm yama.** `session.upload_progress.enabled=0`, öneren firmanın kendi güncellemesine
-  göre yalnızca *kısmi* bir azaltım.
-* Açıklama öncesinde tespit yalnızca **davranışsal** olabilir (istismar sonrası). Bu kit; envanter
-  script'leri ile Sigma, Splunk, QRadar, CrowdStrike Falcon, SentinelOne, Wazuh, YARA ve ModSecurity
-  kurallarını, neyi kapsayıp neyi kapsamadıkları açıkça belirtilmiş olarak sunar.
+* PHP çekirdeğinde kimlik doğrulama gerektirmeyen iki kritik uzaktan kod çalıştırma (RCE) açığı (her biri CVSS v4.0 9.2).
+  **PHP 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 ile düzeltildi** (21 Ekim 2026). PHP 8.1 ve öncesi: upstream yama yok.
+* **Kök neden (resmi yamadan):** PHP **isteği ayrıştırırken** (POST / multipart / upload verisi — henüz hiçbir
+  script çalışmadan) `memory_limit` aşılırsa işlemi yarıda kesiyor ve istek durumunu yarım bırakıyor
+  (CVE-2026-109618) ya da bu durum **aynı worker'daki bir sonraki isteğe** taşınıyor (CVE-2026-109619).
+  Erişilebilir herhangi bir `.php` dosyası yeterli; en riskli SAPI mod_php, PHP-FPM de etkileniyor.
+* **Güncelleyin ve tüm PHP worker'larını yeniden başlatın — tek tam çözüm bu.**
+* PHP duyurusundaki geçici önlemler (yalnızca riski azaltır): `memory_limit = -1` **ve cgroup/container bellek
+  sınırı**, `post_max_size = 8M` (dosya yükleme varsa 32M), `session.upload_progress.enabled = 0`,
+  `fatal_error_backtraces = 0` (8.5). Lab'ımızda PHP'nin kendi regresyon testi isteğinde kesintiyi yalnızca
+  `memory_limit = -1` engelledi (§9).
+* Bu kit: envanter script'leri (düzeltilmiş sürüm + önlem kontrolü, container'lar dahil) ve Sigma, Splunk,
+  QRadar, CrowdStrike Falcon, SentinelOne, Wazuh, YARA ve ModSecurity kuralları — her birinde neyin test
+  edildiği belirtilmiş.
 
 ## 1. Olay nedir?
 
 | Konu | Durum |
 |---|---|
-| Her biri CVSS v4.0 9.2 olan iki kritik PHP açığı; yayın 21 Ekim 2026 14:00 UTC | php.net tarafından **doğrulandı** (20 Ekim ön duyurusu) |
+| Düzeltilmiş sürümler 8.5.12, 8.4.27, 8.3.36, 8.2.35 (21 Ekim 2026) | **Doğrulandı** — php.net sürüm duyuruları |
+| CVE-2026-109618 = GHSA-w8hw-w9fx-j79w, CVE-2026-109619 = GHSA-6wmf-4rv5-p3rp | **Doğrulandı** — PHP NEWS ve "Avoid state corruption via bailout" düzeltme commit'i |
+| Açık sınıfı: istek başlatma / ayrıştırma sırasında bellek tükenmesi kesintisinden sonra durum bozulması; bayat istek durumunun sonraki istekte kullanılması | **Doğrulandı** — php.net duyuru metni ve yama (OOM kesintisi kontrollü çıkışla değiştirildi; global'ler sıfırlanıyor; ayrıştırıcı yumuşak sınırda duruyor) |
+| En riskli mod_php; kimlik doğrulamasız, uygulama kodu çalışmadan önce | **Doğrulandı** — php.net |
+| Her biri CVSS v4.0 9.2 olan iki kritik PHP açığı | php.net tarafından **doğrulandı** (20 Ekim ön duyurusu) |
 | Açık sınıfı: PHP çekirdeğinde kimlik doğrulamasız RCE | watchTowr (CVE-2026-109618'i yeniden üretti) ve diğerleri bildirdi; PHP detay yayınlamadı |
 | CVE numaraları CVE-2026-109618 / CVE-2026-109619 | watchTowr ve sızan materyalden; php.net duyurusunda geçmiyor; kayıtlar "reserved" |
 | "php2shell" adı ve PHP ≥ 5.4'ü hedeflediğini iddia eden "PHP2Shell" aracı | Ekran görüntüsü sızıntısı — doğrulanmadı |
 | Etkilenen sürümler "PHP 5'ten 8'e kadar" | Bildirildi — **doğrulanmadı** |
 | Yama yalnızca desteklenen dallar için (8.2, 8.3, 8.4, 8.5) | Bildirildi; PHP destek politikasıyla uyumlu |
-| *Session Upload Progress* (`ext/session`) ile bağlantı, bellek bozulması | GMO Flatt Security'nin değerlendirmesi; kendi araştırmalarının php2shell ile örtüşmesi *koşuluyla* |
+| *Session Upload Progress* (`ext/session`) ile bağlantı, bellek bozulması | GMO Flatt Security'nin açıklama öncesi değerlendirmesi. **Yama, bunun nedenin kendisi değil yollardan biri olduğunu gösteriyor**: upload-progress işleyicisi de sıkılaştırıldı (istek başlamadan sınıf çözümleme / kullanıcı kodu yok, geride `$_SESSION` kalmıyor) |
 | Sahada aktif istismar | 21 Ekim sabahı itibarıyla bildirilmedi (watchTowr, Huntress) |
 
 Zaman çizelgesi: 20 Ekim ~18:20 TSİ Hacker News'te sızıntı → 20 Ekim 22:33 TSİ PHP ön duyurusu →
-21 Ekim 17:00 TSİ planlı yayın.
+21 Ekim: php.net'te düzeltilmiş sürümler ve duyuru.
 
 ## 2. Neden önemli?
 
@@ -48,12 +56,12 @@ Zaman çizelgesi: 20 Ekim ~18:20 TSİ Hacker News'te sızıntı → 20 Ekim 22:3
 
 ## 3. Etkilenen sistemler — şu an bilinenler
 
-| Runtime | Beklenen durum (resmi duyuru bekleniyor) |
+| Runtime | Durum (21 Ekim) |
 |---|---|
-| php.net, Remi, deb.sury.org, resmi Docker imajları ve Windows build'lerinden gelen PHP 8.2 / 8.3 / 8.4 / 8.5 | Upstream yama 21 Ekim 17:00 TSİ bekleniyor |
+| php.net, Remi, deb.sury.org, resmi Docker imajları ve Windows build'lerinden gelen PHP 8.2 / 8.3 / 8.4 / 8.5 | **Upstream'de 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 ile düzeltildi** — yeniden paketlenmiş build'ler arkadan gelir |
 | PHP 8.1 ve öncesi (upstream EOL) | **Upstream yama yok.** Yalnızca dağıtım/ESM/üretici backport'u veya yükseltme |
 | Dağıtım paketleri (RHEL/Rocky/Alma, Debian, Ubuntu, SUSE) | Yama dağıtımın güvenlik süreciyle gelir — zamanlama farklı, bkz. §7 |
-| Tüm SAPI'ler (mod_php, PHP-FPM, CGI/FastCGI, LiteSpeed) | Bildirilen denemeler mod_php ve php-fpm üzerinde WordPress/Laravel/Symfony ile yeniden üretimi içeriyor (Flatt Security'nin araştırmacı paylaşımı özetine göre) |
+| Tüm SAPI'ler (mod_php, PHP-FPM, CGI/FastCGI, LiteSpeed) | php.net: en riskli mod_php. Kalıcı worker'lar (mod_php, FPM, LiteSpeed) bayat durumu istekler arasında taşır; istek başına açılan CGI süreçleri taşımaz |
 
 ## 4. Neleri kontrol etmek lazım? (script'leri kullanın)
 
@@ -77,10 +85,13 @@ powershell -ExecutionPolicy Bypass -File .\php2shell-check.ps1 -OutFile report.j
 Çıkış kodları: `0` PHP yok, `1` PHP var ve tüm runtime'lar yamalı doğrulandı, `2` PHP var ve en az bir
 runtime yamalı **doğrulanamadı**.
 
-Resmi duyuru çıktıktan sonra düzeltilmiş sürümleri (yalnızca php.net'ten) tanımlayın:
-`PHP2SHELL_FIXED_UPSTREAM="8.2.x 8.3.x 8.4.x 8.5.x"`. Linux script'i, yamayı backport eden dağıtım
-paketlerine (RHEL/Ubuntu eski sürüm numarasını korur) upstream sürüm karşılaştırması **uygulamaz**;
-bunlar için paket changelog'unda CVE'nin geçmesine bakar.
+v1.3.0'dan itibaren düzeltilmiş sürümler **8.2.35 8.3.36 8.4.27 8.5.12** script'lerin içinde
+(`PHP2SHELL_FIXED_UPSTREAM` ile değiştirilebilir). Linux script'i, yamayı backport eden dağıtım paketlerine
+(RHEL/Ubuntu eski sürüm numarasını korur) upstream sürüm karşılaştırması **uygulamaz**; bunlar için paket
+changelog'unda CVE'nin geçmesine bakar. Her runtime için ayrıca bir `Interim:` satırı (JSON'da
+`interim_mitigations`) duyurudaki dört ayardan hangilerinin etkin olduğunu gösterir. Override listesi artık
+pool / vhost / dizin düzeyindeki `memory_limit` ve `post_max_size` değerlerini de içeriyor; bunlar
+php.ini'deki önlemi sessizce geçersiz kılabilir.
 
 Kontrol listesi:
 1. Her PHP runtime'ını **ve web sunucusunun gerçekten kullandığı SAPI'yi** envanterleyin (CLI değerleri ≠ FPM değerleri).
@@ -94,19 +105,34 @@ Kontrol listesi:
 
 ## 5. Bilinen workaround'lar — güncel durum
 
-| Workaround | Durum (21 Ekim, 10:30 TSİ) | Notlar |
+PHP duyurusu aşağıdaki geçici önlemleri listeliyor. **Bunlar riski azaltır, kurulumu güvenli hale getirmez.**
+php.ini, FPM pool (`php_admin_value` / `php_admin_flag`) veya web sunucusu yapılandırmasında ayarlayın —
+`ini_set()` veya `.user.ini` ile **değil** — ve **tüm PHP worker'larını yeniden başlatın**.
+
+```ini
+memory_limit = -1                      ; FPM: php_admin_value[memory_limit] = -1 (uygulama ezemez)
+post_max_size = 8M                     ; dosya yükleme gerekiyorsa 32M
+session.upload_progress.enabled = 0
+fatal_error_backtraces = 0             ; yalnızca PHP 8.5
+```
+
+| Workaround | Durum (21 Ekim, yayın sonrası) | Notlar |
 |---|---|---|
-| `session.upload_progress.enabled = 0` | **Yalnızca kısmi azaltım.** Öneren Flatt Security yazısını güncelledi: saldırının yine mümkün olacağı değerlendiriliyor. PHP çekirdek geliştiricilerinin de INI ayarlarının tek başına korumayacağını söylediği aktarılıyor. Bir analiz, iki açıktan yalnızca birini kapsadığını iddia ediyor. | Maliyeti düşük: dosya yükleme çalışmaya devam eder, yalnızca ilerleme takibi durur. `INI_PERDIR`'dir: php.ini, FPM pool (`php_admin_flag`), Apache `php_admin_flag` ile ayarlanır — `ini_set()` ile **olmaz**. SAPI bazında etkin değeri script ile doğrulayın. |
-| `session.use_strict_mode = 1` | **Bu mekanizma için azaltım değil** (lab notlarımız, §9) | Yine de iyi bir hijyen ayarı. |
-| `PHP_SESSION_UPLOAD_PROGRESS` multipart alanı için WAF kuralı | **Avlama / yalnızca tek vektör** | Lab'da test edilmiş ModSecurity kuralları `rules/modsecurity/` altında. Engelleme varyantı varsayılan olarak kapalı. |
+| `memory_limit = -1` | **Temel geçici önlem** (php.net). Lab'ımızda ayrıştırma sırasındaki bellek kesintisini engelleyen tek ayar (§9) | **DoS riski doğurur**: birkaç MB'lık bir isteğin ayrıştırılması yüzlerce MB bellek harcayabilir. Belleği cgroup/container sınırıyla kısıtlayın (php-fpm/httpd için systemd `MemoryMax=`, container memory limit, IIS app pool private memory limit) ve `pm.max_children`'ı buna göre ayarlayın. php.net: cgroup kullanın, `RLIMIT_AS` / `RLIMIT_DATA` **değil**. |
+| `post_max_size = 8M` (yükleme varsa 32M) | Destekleyici (php.net) | 8M zaten PHP varsayılanı. Lab'ımızda **tek başına engellemedi**: 3 MB'lık gövde 128M'yi tüketti. |
+| `session.upload_progress.enabled = 0` | Destekleyici (php.net); bir büyütücüyü kaldırır | Lab'ımızda **tek başına engellemedi**. `INI_PERDIR`: php.ini, FPM `php_admin_flag`, Apache `php_admin_flag`. |
+| `fatal_error_backtraces = 0` | Yalnızca PHP 8.5 (php.net) | Sonrasında worker'ları yeniden başlatın. |
+| `session.use_strict_mode = 1` | **Azaltım değil** (lab notlarımız, §9) | Yine de iyi bir hijyen ayarı. |
+| WAF / ModSecurity | **Avlama + gövde sınırları** | Önerilen `SecRequestBodyNoFilesLimit 131072` + `SecRequestBodyLimitAction Reject` ayarı lab'ımızda PHP'nin regresyon testi gövdesini reddetti. 9109622/23 kuralları part-başlık selini ve gövde hatalarını loglar. |
 | Maruziyeti kısıtlama (VPN/IP izin listesi, yönetim panellerini kapatma, EOL sunucuları izole etme) | Etkili risk azaltımı | CERT-EU, yama gelene kadar internete açık uygulamaların izole edilmesini öneriyor. |
 | PHP kullanıcısı için en az yetki, çıkış (egress) filtreleme, salt okunur web kökleri | Etkiyi sınırlar | Flatt Security de öneriyor; webshell kalıcılığını da zorlaştırır. |
-| Yama | **Çözüm** | Upstream 21 Ekim 17:00 TSİ; dağıtım zamanlaması §7. |
+| Yama | **Çözüm** | Upstream 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12; dağıtım zamanlaması §7. Worker'ları yeniden başlatın. |
 
 ## 6. Tespit ve izleme kuralları
 
-Yama diff'i açıklanmadan istismara özel imza yazılamaz. Aşağıdaki kurallar saldırganın PHP'de kod
-çalıştırdıktan *sonra* yaptıklarını ve şüphelenilen mekanizma etrafındaki avlama sinyallerini yakalar.
+Yama artık açık olduğu için burada iki tür kural var: **tetikleme koşulu** kuralları (PHP bir isteği
+ayrıştırırken belleği tükendi — açığın ihtiyaç duyduğu durum — ve WAF'ta part-başlık seli) ve saldırganın kod
+çalıştırdıktan *sonra* yaptıklarını yakalayan **davranışsal** kurallar.
 **Tüm SIEM/EDR sorguları canlı platformlarda TEST EDİLMEDİ** (Sigma kaynaklarından pySigma ile üretildi);
 YARA, ModSecurity ve script'ler lab'ımızda test edildi. Alarm açmadan önce 1–2 saat baseline alın.
 
@@ -116,13 +142,19 @@ YARA, ModSecurity ve script'ler lab'ımızda test edildi. Alarm açmadan önce 1
 | Linux: PHP'den reverse shell / keşif komut satırı | `lnx_..._suspicious_cmdline.yml` | ✓ | ✓ | ✓ | ✓ | 109613 | — |
 | Windows: php-cgi/php/httpd/w3wp shell/LOLBin başlatıyor | `win_..._spawns_shell_or_lolbin.yml` | ✓ | ✓ | ✓ | ✓ | 109620 (Sysmon) | — |
 | Web köküne webshell / `.user.ini` / `.htaccess` yazılması | `lnx_/win_..._file_written_to_webroot.yml` | ✓ | ✓ | Falcon'un yerleşik webshell tespitleri | ✓ | 109615, 109616, 109621 | YARA |
+| **PHP isteği ayrıştırırken belleği tükendi** (`Allowed memory size … in Unknown on line 0`) — tetikleme koşulu | `php2shell_php_oom_during_request_parsing.yml` | ✓ | payload | ✓ (log ingestion gerekir) | — | 109627, 109629 (seri) | — |
+| **Ayrıştırma sırasında bellek tükenmesinden sonra 2 dk içinde worker çökmesi** | — | — | — | — | — | 109628 (seviye 14) | — |
 | PHP worker çökmesi (SIGSEGV/SIGABRT) — bellek bozulması denemeleri | `php2shell_php_worker_crash.yml` | ✓ | payload | ✓ (log ingestion gerekir) | — | 109625, 109626 | — |
+| Multipart part-başlık seli / istek gövdesi hataları | — | — | — | — | — | — | ModSecurity 9109622, 9109623 |
 | Multipart isteklerde upload-progress alanı | — | — | — | — | — | — | ModSecurity 9109618/19/21 (+ engelleme 9109620) |
 | Webshell, auto_prepend kalıcılığı, upload-progress session kalıntıları | — | — | — | — | — | — | YARA `rules/yara/` |
 
 Veri gereksinimleri: üst süreç bilgisiyle süreç oluşturma (Linux/Windows için Sysmon, auditd `execve`,
 EDR), web kökü kuralları için dosya oluşturma telemetrisi, çökme kuralı için PHP-FPM/Apache hata
-logları, ModSecurity için istek gövdesi incelemesi. Platform notları:
+logları, ModSecurity için istek gövdesi incelemesi. Bellek tükenmesi kuralı, PHP hatalarının iletilen bir
+log'da olmasını gerektirir (`log_errors=On`; FPM için `catch_workers_output=yes` veya pool `error_log`).
+Yamalı sunucularda da bu mesaj görülebilir (PHP artık temiz duruyor) — bunu ele geçirilme değil, deneme
+göstergesi olarak değerlendirin. Platform notları:
 
 * **Splunk** — `.spl` Sysmon alan adlarını (`Image`, `ParentImage`, `CommandLine`), `.cim.spl` CIM Endpoint veri modelini kullanır.
 * **QRadar** — alan tabanlı `.aql` Sysmon/EDR custom property'leri (*Parent Process Path*, *Command*) gerektirir; Linux OS DSM (auditd) genelde üst süreç bilgisi taşımaz → `.payload.aql` veya Wazuh/auditd yaklaşımı.
@@ -154,15 +186,38 @@ Her durumda: güncellemeden sonra **PHP-FPM / Apache / IIS app pool'larını yen
 
 ## 8. Bugün için önerilen plan
 
-1. Şimdi: envanter script'lerini çalıştırın; internete açık PHP'leri, EOL dalları ve paket kaynaklarını listeleyin.
-2. Şimdi: davranışsal kuralları (süreç, dosya, çökme) SIEM/EDR'de açın; ModSecurity kurallarını log modunda açın.
-3. Şimdi: ilerleme çubuğu kullanılmayan yerlerde `session.upload_progress.enabled=0` ayarlayın — yama değil, risk azaltımı olarak.
-4. Şimdi: hosting/panel/cihaz üreticilerinden ve dağıtım kanallarından yayın planlarını isteyin.
-5. 17:00 TSİ: duyuruyu okuyun, `PHP2SHELL_FIXED_UPSTREAM`'i ayarlayın, önce upstream'i takip eden sunucuları yamalayın, servisleri yeniden başlatın.
-6. Dağıtım paketleri gelene kadar: RHEL/Ubuntu paketli PHP'lerin maruziyetini kısıtlayın, kuralları yakından izleyin.
-7. Sonrasında: maruz kalmış sunucularda webshell (YARA), yeni `.user.ini`/`.htaccess`, yeni cron job ve hesap avı yapın.
+1. v1.3.0 script'lerini çalıştırın: `NOT PATCHED` / `NOT CONFIRMED` runtime'ları, `Interim:` satırlarını ve paket kaynaklarını listeleyin.
+2. Upstream'i takip eden sunucular (php.net, Remi, Sury, resmi imajlar, Windows): 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12'ye güncelleyin, FPM / Apache / IIS app pool'larını **yeniden başlatın**, imajları yeniden derleyip **yeniden deploy edin**. Script'i tekrar çalıştırın (`Running: LOADED`).
+3. Dağıtım paketleri (RHEL/Rocky/Alma, Ubuntu): üretici paketi CVE'leri listeleyene kadar geçici önlemleri cgroup bellek sınırıyla **birlikte** uygulayın ve maruziyeti kısıtlayın.
+4. Bellek tükenmesi ve çökme kurallarını (Wazuh 109627–109629, Sigma), ModSecurity gövde sınırlarını + 9109622'yi log modunda ve davranışsal kuralları açın.
+5. Maruz kalmış sunucularda av: 20 Ekim'den beri `in Unknown on line 0` bellek hataları ve worker çökmeleri, webshell (YARA), yeni `.user.ini`/`.htaccess`, cron job ve hesaplar.
+6. Upstream-EOL dallar (≤ 8.1): yükseltme, üretici/ESM backport'u veya izolasyon.
 
-## 9. Lab notları (ORBITRON, Ubuntu 24.04, PHP 8.3.6, mod_php ve yerleşik sunucu)
+## 9. Lab notları
+
+### 9a. Yama analizi (21 Ekim, yayın sonrası) — yalnızca resmi yama ve regresyon testleri
+
+Yöntem: `php-8.3.35..php-8.3.36` diff'i (düzeltme commit'i `3c832b523e`, "Avoid state corruption via bailout",
+dört dalda aynı yama); PHP'nin **kendi** yeni `.phpt` regresyon testleri, yamasız 8.3.35 ve yamalı 8.3.36'nın
+debug + ASan build'lerinde (php-cgi) çalıştırıldı. Exploit kodu yazılmadı, kullanılmadı.
+
+* Yamanın değiştirdikleri: istek başlatma sırasında bellek tükenmesi artık yarım kurulmuş durumdan `longjmp`
+  ile çıkmıyor; istek ayrıştırıcısı (`main/rfc1867.c`, `main/php_variables.c`, `main/SAPI.c`) yumuşak sınırı
+  kontrol edip temiz şekilde duruyor; bir sonraki isteğe taşınabilecek global'ler sıfırlanıyor (`$_GET/$_POST/...`
+  alanları, son hata, modül durumu); multipart ayrıştırıcı yalnızca `Content-Disposition` / `Content-Type` part
+  başlıklarını tutuyor, tekrarları yok sayıyor; upload-progress işleyicisi istek başlamadan sınıf çözümlemiyor,
+  kullanıcı kodu (`__wakeup`, autoload) çalıştırmıyor ve `session_start()` çağırmayan script'lerde geride
+  `$_SESSION` bırakmıyor.
+* Yamasız 8.3.35: uygulanabilir 27 yeni testten 5'i başarısız (iki multipart part-başlık seli testi → ayrıştırma
+  sırasında bellek tükenmesi; üç upload-progress session testi). Yamalı 8.3.36: 27/27 başarılı.
+* Geçici önlemler, PHP'nin regresyon testi gövdesiyle (tek alan, 600.000 başlık satırı, 3 MB), yamasız 8.3.35
+  php-cgi: varsayılan ayarlar → `Allowed memory size of 134217728 bytes exhausted … in Unknown on line 0`;
+  `post_max_size=8M` → aynı; `session.upload_progress.enabled=0` → aynı; `memory_limit=-1` → istek tamamlandı
+  (debug build'de ≈218 MB tepe). Yamalı 8.3.36, varsayılan ayarlarla: ≈2 MB tepe.
+* Testin sınırları: debug + ASan build'ler (bellek hesabı release build'lerden farklı); tek istekli CGI —
+  kalıcı worker'larda istekler arası yeniden kullanım (CVE-2026-109619) yeniden üretilmedi.
+
+### 9b. Açıklama öncesi: upload-progress mekanizması (Ubuntu 24.04, PHP 8.3.6, mod_php ve yerleşik sunucu)
 
 Flatt Security'nin işaret ettiği *mekanizmayı* test ettik — açığın kendisini değil:
 * `PHP_SESSION_UPLOAD_PROGRESS` adlı alan içeren bir multipart istek, hedef script `session_start()`
@@ -172,9 +227,12 @@ Flatt Security'nin işaret ettiği *mekanizmayı* test ettik — açığın kend
 * Varsayılan `session.upload_progress.cleanup=On` ile session dosyası boş olarak kaldı.
 * Var olmayan bir `.php` yoluna (404) yapılan istek mekanizmayı tetiklemedi — *erişilebilir* her PHP script'i tetikliyor.
 * ModSecurity 2.9: log kuralları yalnızca alanı taşıyan multipart isteklerde tetiklendi; normal yüklemeler işaretlenmedi; engelleme varyantı 403 döndü.
+* ModSecurity 2.9.7 (v1.3.0): 9109622, 1.000 part-başlık satırı içeren multipart isteklerde (dosyalı ve dosyasız part) tetiklendi, normal yüklemede tetiklenmedi; PHP'nin 3 MB'lık regresyon testi gövdesi, önerilen gövde sınırı yapılandırması tarafından PHP'ye ulaşmadan reddedildi (HTTP 400).
 
 ## 10. Kaynaklar
 
+* PHP — 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 güvenlik sürümleri (21 Ekim 2026): https://www.php.net/archive/2026.php#2026-10-21-1
+* PHP kaynak kodu — "Avoid state corruption via bailout" düzeltme commit'i (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp): https://github.com/php/php-src/commit/3c832b523ee13b1a010177d2ff84aea18be0015e
 * PHP — Upcoming Critical PHP Security Release (20 Ekim 2026): https://www.php.net/archive/2026.php#2026-10-20-1
 * GMO Flatt Security — php2shell özeti ve öneriler (Japonca, 21 Ekim'de güncellendi): https://blog.flatt.tech/entry/php2shell
 * Sansec — Critical PHP RCE: https://sansec.io/research/php2shell

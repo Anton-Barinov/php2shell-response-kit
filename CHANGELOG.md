@@ -7,6 +7,25 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.0 — 2026-10-21 (after the PHP security release)
+* PHP released **8.5.12, 8.4.27, 8.3.36, 8.2.35**. Root cause from the official fix ("Avoid state corruption
+  via bailout", GHSA-w8hw-w9fx-j79w / CVE-2026-109618, GHSA-6wmf-4rv5-p3rp / CVE-2026-109619): out-of-memory
+  abort while parsing the request leaves corrupted / stale state for the next request on the worker.
+* **Scripts (Linux v1.3.0, Windows v1.3.0):** fixed versions built in (`PHP2SHELL_FIXED_UPSTREAM` still
+  overrides); new `Interim:` line / `interim_mitigations` JSON per runtime and per container for the four
+  advisory settings (`memory_limit=-1`, `post_max_size`, `session.upload_progress.enabled=0`,
+  `fatal_error_backtraces=0` on 8.5); `memory_limit`, `post_max_size`, `fatal_error_backtraces` added to the
+  reported settings and to the override search (pool / web server / per-directory); `--container-exec`
+  also reports `memory_limit`; summary text follows the advisory.
+* **New rules:** Sigma `php2shell_php_oom_during_request_parsing` (+ Splunk, QRadar payload, CrowdStrike);
+  Wazuh 109627 (out-of-memory during request parsing), 109628 (followed by a worker crash within 2 min),
+  109629 (burst); ModSecurity 9109622 (multipart part-header flood, log only), 9109623 (request-body error,
+  log only).
+* **Fix (generated CrowdStrike queries):** keyword searches were rendered as `/"text"/i`, which requires
+  literal quotes in the event; now `/text/i`. Affects `php2shell_php_worker_crash.logscale`.
+* README (EN/TR): status, confirmed facts, workaround table per the advisory (with the `memory_limit=-1`
+  DoS caveat), detection table, plan, and lab notes from the patch analysis (official regression tests only).
+
 ## v1.2.3 — 2026-10-21 14:55 TRT
 * **Fix (Linux):** for Apache + mod_php containers (e.g. official `php:*-apache` images) package and
   fix status were taken from the Apache executable (`apache2-bin`), not from PHP. The script now reads the

@@ -16,6 +16,7 @@ backends' default data models (see header of each file). Review before deploying
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 import traceback
 
@@ -82,6 +83,11 @@ def main() -> int:
                     header += ("// WARNING: the PQ backend approximates 'endswith' with 'contains' (e.g. '/sh' also matches '/ssh').\n"
                                "// Prefer the .dv variant or tighten the patterns after baselining.\n")
                 body = "\n\n".join(str(q) for q in queries)
+                if platform == "crowdstrike":
+                    # The LogScale backend renders Sigma keywords as /"text"/i, a regex that requires
+                    # literal double quotes around the text. Raw log lines have none: drop them
+                    # (escape regex metacharacters in the keyword).
+                    body = re.sub(r'/"([^"/]*)"/i', lambda m: "/" + re.sub(r'([.*+?()\[\]{}|^$\\])', r'\\\1', m.group(1)) + "/i", body)
                 (outdir / f"{rule_path.stem}.{ext}").write_text(header + body + "\n", encoding="utf-8")
                 report.append(f"| {rule_path.stem} | {platform} | {ext} | ok |")
             except Exception as e:  # noqa: BLE001
