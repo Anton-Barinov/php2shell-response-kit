@@ -1,6 +1,6 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON müdahale kiti
 
-> **Durum: v1.1 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 12:15 TSİ / 09:15 UTC).**
+> **Durum: v1.2 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 13:20 TSİ / 10:20 UTC).**
 > Teknik detayları, etkilenen ve düzeltilmiş sürümleri içeren resmi PHP duyurusu
 > **21.10.2026 17:00 TSİ (14:00 UTC)** için planlandı. Sürüm çıktıktan sonra bu repo güncellenecek.
 > Aşağıda *bildirilen* veya *doğrulanmamış* olarak işaretlenen her şey değişebilir. Değişiklikler: [CHANGELOG.md](CHANGELOG.md).
@@ -59,7 +59,7 @@ Zaman çizelgesi: 20 Ekim ~18:20 TSİ Hacker News'te sızıntı → 20 Ekim 22:3
 
 | Script | Platform | Ne yapar |
 |---|---|---|
-| [`scripts/linux/php2shell-check.sh`](scripts/linux/php2shell-check.sh) | Linux (RHEL ailesi, Debian/Ubuntu, Alpine, cPanel/Plesk/CloudLinux/Remi yolları) | Tüm PHP binary'lerini ve SAPI'leri bulur, SAPI bazında **etkin** ayarları okur (CLI, FPM, CGI, mod_php ini seti), FPM pool / web sunucusu / `.user.ini` / `.htaccess` override'larını listeler, paket ve kaynağını (dağıtım, Remi, Sury), paket changelog'unda CVE'lerin geçip geçmediğini, çalışan süreçleri, **çalışan FPM worker'larının / Apache alt süreçlerinin son config değişikliğinden sonra başlatılıp başlatılmadığını ve güncel binary'yi kullanıp kullanmadığını** (`LOADED` / `STALE` / `RESTART REQUIRED`) ve opsiyonel olarak container'ları raporlar |
+| [`scripts/linux/php2shell-check.sh`](scripts/linux/php2shell-check.sh) | Linux (RHEL ailesi, Debian/Ubuntu, Alpine, cPanel/Plesk/CloudLinux/Remi yolları) | Tüm PHP binary'lerini ve SAPI'leri bulur, SAPI bazında **etkin** ayarları okur (CLI, FPM, CGI, mod_php ini seti), FPM pool / web sunucusu / `.user.ini` / `.htaccess` override'larını listeler, paket ve kaynağını (dağıtım, Remi, Sury), paket changelog'unda CVE'lerin geçip geçmediğini, çalışan süreçleri, **çalışan FPM worker'larının / Apache alt süreçlerinin son config değişikliğinden sonra başlatılıp başlatılmadığını ve güncel binary'yi kullanıp kullanmadığını** (`LOADED` / `STALE` / `RESTART REQUIRED`) ve **sunucudaki container / Kubernetes pod'larının içindeki PHP'yi** (Docker, Podman, containerd, CRI-O) `/proc/<pid>/root` üzerinden salt okunur inceleyerek raporlar — container bazında sürüm, paket, `session.upload_progress` ve çalışma durumu; `crictl`/`docker`/`podman` varsa pod/container adlarıyla |
 | [`scripts/windows/php2shell-check.ps1`](scripts/windows/php2shell-check.ps1) | Windows (IIS FastCGI, XAMPP, WAMP, Laragon, Plesk, PATH, çalışan süreçler) | Aynısını Windows için yapar; her IIS FastCGI uygulamasını kendi argümanları/`PHPRC` değeriyle değerlendirir; çalışan `php-cgi.exe` / Apache süreçlerinin son `php.ini` değişikliğinden veya PHP binary'sinden eski olup olmadığını kontrol eder (IIS `monitorChangesTo` dahil) |
 
 İkisi de **yalnızca okuma yapar**, ağ bağlantısı kurmaz ve istismar denemez. Filo genelinde toplama
@@ -68,7 +68,8 @@ için JSON çıktı verir (ör. ORBITRON Command Engine, Ansible, SCCM/Intune).
 ```bash
 sudo bash php2shell-check.sh                 # okunabilir çıktı
 sudo bash php2shell-check.sh -o report.json  # + JSON
-sudo bash php2shell-check.sh --containers    # çalışan Docker/Podman container'larındaki PHP (isteğe bağlı, exec kullanır)
+sudo bash php2shell-check.sh --no-containers   # (salt okunur) container / pod incelemesini atla
+sudo bash php2shell-check.sh --container-exec  # ek olarak docker/podman exec ile 'php -r' çalıştırıp kesin CLI değerlerini al
 ```
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\php2shell-check.ps1 -OutFile report.json

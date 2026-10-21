@@ -7,6 +7,23 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.2.0 — 2026-10-21 13:20 TRT
+* **Fix (Linux):** processes running in a container were matched to host binaries with the same path
+  (`/proc/<pid>/exe` shows the path inside the container). This could put container workers into the host
+  `Running:` result (wrong `STALE`/`LOADED`) and add container binaries to host discovery. The script now
+  separates processes by mount namespace.
+* **New (Linux):** containers / Kubernetes pods on the host are inspected by default, read-only via
+  `/proc/<pid>/root` — works for Docker, Podman, containerd and CRI-O, nothing is executed inside them.
+  Per container: PHP version (env, `php_version.h`, dpkg owner of the binary, apk, binary string), package and
+  changelog status, official-image (`/usr/local`) vs distro layout, `session.upload_progress.enabled` parsed
+  from ini/pool files, and the `Running:` state against the container's own config files. Pod / container
+  names via `crictl`, `docker` or `podman inspect` when available; Apache containers are recognised when
+  `libphp` is loaded.
+* Options: `--no-containers` skips the inspection; `--container-exec` (alias of the old `--containers`)
+  additionally runs `php -r` through `docker|podman exec`.
+* Limits: only containers running on this host/node; images and stopped containers are not covered (use an
+  image scanner such as Trivy/Grype after the advisory); values are parsed from files, not `php -i`.
+
 ## v1.1.0 — 2026-10-21 12:15 TRT
 * Scripts: new `Running:` check per runtime. Settings were read from the ini files on disk only, so an `Off`
   result did not prove that running workers had been reloaded. Both scripts now compare the start time of the

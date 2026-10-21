@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.1.0  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.2.0  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -14,10 +14,13 @@
 #    - running PHP / web server processes, and whether the RUNNING workers
 #      actually use the current configuration and binary (a settings change
 #      or a package update only takes effect after a reload/restart)
-#    - optionally (--containers) PHP inside running Docker/Podman containers
+#    - PHP running inside containers / Kubernetes pods on this host (Docker,
+#      Podman, containerd, CRI-O): found via the process table, inspected
+#      READ-ONLY through /proc/<pid>/root - nothing is executed inside them
+#    - optionally (--container-exec) exact values via 'docker|podman exec php'
 #
-#  Usage:  sudo ./php2shell-check.sh [--json] [-o report.json]
-#                                    [--webroot DIR]... [--containers]
+#  Usage:  sudo ./php2shell-check.sh [--json] [-o report.json] [--webroot DIR]...
+#                                    [--no-containers] [--container-exec]
 #  Exit codes: 0 = no PHP found, 1 = PHP found and every runtime confirmed
 #              patched, 2 = PHP found and at least one runtime NOT confirmed
 #              patched, 3 = usage error.
@@ -28,7 +31,7 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
 # Fixed upstream versions. EMPTY until the official PHP advisory is published
@@ -41,17 +44,19 @@ SUPPORTED_BRANCHES="8.2 8.3 8.4 8.5"
 
 JSON_ONLY=0
 OUT_FILE=""
-SCAN_CONTAINERS=0
+SCAN_CONTAINERS=1
+CONTAINER_EXEC=0
 WEBROOTS=()
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) JSON_ONLY=1 ;;
     -o|--output) shift; OUT_FILE="${1:-}"; [ -n "$OUT_FILE" ] || { usage; exit 3; } ;;
     --webroot) shift; [ -n "${1:-}" ] || { usage; exit 3; }; WEBROOTS+=("$1") ;;
-    --containers) SCAN_CONTAINERS=1 ;;
+    --no-containers) SCAN_CONTAINERS=0 ;;
+    --container-exec|--containers) CONTAINER_EXEC=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 3 ;;
   esac
@@ -96,6 +101,11 @@ case " $OS_ID $OS_LIKE " in
   *" suse "*|*" sles "*|*" opensuse "*) PKG_FAMILY="rpm" ;;
 esac
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Mount namespace of this script. Processes in another mount namespace run in a
+# container: their /proc/<pid>/exe path refers to the CONTAINER file system and
+# must not be matched against binaries of this host.
+SELF_MNT="$(readlink /proc/self/ns/mnt 2>/dev/null)"
+same_mnt() { local m; m="$(readlink "/proc/$1/ns/mnt" 2>/dev/null)"; [ -z "$m" ] || [ -z "$SELF_MNT" ] || [ "$m" = "$SELF_MNT" ]; }
 [ "$(id -u)" -eq 0 ] || say "WARNING: not running as root - some configs/changelogs may be unreadable."
 
 # --------------------------------------------------------------------------
@@ -126,6 +136,7 @@ done
 # binaries of running processes (catches custom builds in odd paths)
 if [ -d /proc ]; then
   for exe in /proc/[0-9]*/exe; do
+    same_mnt "$(basename "$(dirname "$exe")")" || continue   # container process: handled in section 6
     t="$(readlink "$exe" 2>/dev/null)" || continue
     case "$(basename "$t")" in php|php[0-9]*|php-fpm*|php-cgi*|lsphp*) CANDIDATES+=("$t") ;; esac
   done
@@ -224,12 +235,13 @@ fix_status() { # $1=upstream version $2=changelog status $3=package origin $4=pa
 # started with until a reload/restart.
 # --------------------------------------------------------------------------
 NOW_EPOCH="$(date +%s)"
-declare -A P_PPID P_START P_EXE
+declare -A P_PPID P_START P_EXE P_HOST
 if have ps; then
   while read -r pid ppid et; do
     [ -n "$pid" ] || continue
     P_PPID[$pid]="$ppid"; P_START[$pid]=$((NOW_EPOCH - et))
     P_EXE[$pid]="$(readlink "/proc/$pid/exe" 2>/dev/null)"
+    if same_mnt "$pid"; then P_HOST[$pid]=1; else P_HOST[$pid]=0; fi
   done < <(ps -eo pid=,ppid=,etimes= 2>/dev/null)
 fi
 ANY_STALE=0
@@ -269,24 +281,32 @@ runtime_state() { # $1=match mode (bin|apache|none) $2=binary $3=php.ini $4=scan
   local nm cfg_epoch cfg_file
   nm="$(newest_mtime "${files[@]+"${files[@]}"}")"; cfg_epoch="${nm%%|*}"; cfg_file="${nm#*|}"
 
-  # matching processes
-  local pid exe base fam=() deleted=0
+  # matching processes (host mount namespace only)
+  local pid exe base fam=()
   for pid in "${!P_EXE[@]}"; do
     exe="${P_EXE[$pid]}"; [ -n "$exe" ] || continue
+    [ "${P_HOST[$pid]:-1}" = "1" ] || continue
     base="$(basename "${exe% (deleted)}")"
     case "$mode" in
       bin)    [ "${exe% (deleted)}" = "$bin" ] || continue ;;
       apache) case "$base" in httpd|apache2) ;; *) continue ;; esac ;;
     esac
     fam+=("$pid")
-    case "$exe" in *" (deleted)") deleted=$((deleted+1)) ;; esac
   done
+  eval_family "$cfg_epoch" "$cfg_file" "${fam[@]+"${fam[@]}"}"
+}
+
+eval_family() { # $1=config epoch $2=config file $3..=pids -> STATE_TEXT / STATE_JSON
+  local cfg_epoch="$1" cfg_file="$2"; shift 2
+  local fam=("$@") deleted=0 p
+  STATE_TEXT=""; STATE_JSON=""
   if [ ${#fam[@]} -eq 0 ]; then
     STATE_TEXT="not running"
     STATE_JSON="{\"status\":\"not-running\"}"; return
   fi
+  for p in "${fam[@]}"; do case "${P_EXE[$p]}" in *" (deleted)") deleted=$((deleted+1)) ;; esac; done
   # masters = processes whose parent is not of the same family; workers = the rest
-  local workers=0 stale=0 oldest=0 masters=0 mstale=0 p fampids=" ${fam[*]} "
+  local workers=0 stale=0 oldest=0 masters=0 mstale=0 fampids=" ${fam[*]} "
   for p in "${fam[@]}"; do
     if [[ "$fampids" == *" ${P_PPID[$p]} "* ]]; then
       workers=$((workers+1))
@@ -454,7 +474,7 @@ say "         nginx 'fastcgi_param PHP_VALUE' / PHP_ADMIN_VALUE and FPM php_admi
 # 5. Running processes
 # --------------------------------------------------------------------------
 hr
-say "Running PHP / web server processes (master + worker counts):"
+say "Running PHP / web server processes (master + worker counts, host and containers):"
 PROC_JSON=()
 if have ps; then
   while IFS= read -r line; do
@@ -466,24 +486,202 @@ fi
 [ ${#PROC_JSON[@]} -eq 0 ] && say "   none"
 
 # --------------------------------------------------------------------------
-# 6. Containers (opt-in: executes 'php' inside each running container)
+# 6. Containers / Kubernetes pods (READ-ONLY via /proc/<pid>/root)
+#    Works for Docker, Podman, containerd and CRI-O because it starts from the
+#    host process table. Nothing is executed inside the container: version and
+#    settings are read from files (env, headers, package DB, binary strings,
+#    ini/pool files). Values are therefore "parsed", not "effective"; use
+#    --container-exec for php -i based values via docker/podman exec.
 # --------------------------------------------------------------------------
 CONT_JSON=()
-if [ "$SCAN_CONTAINERS" -eq 1 ]; then
-  hr
-  say "Containers (CLI values shown; FPM inside the container may use another ini):"
+
+is_php_proc() { # $1=pid -> 0 if PHP-related (php, php-fpm, php-cgi, lsphp or Apache with libphp loaded)
+  local exe="${P_EXE[$1]% (deleted)}" b
+  b="$(basename "$exe")"
+  case "$b" in
+    php|php[0-9]*|php-fpm|php-fpm[0-9]*|php-cgi|php-cgi[0-9]*|lsphp|lsphp[0-9]*|frankenphp) return 0 ;;
+    httpd|apache2) grep -qs 'libphp' "/proc/$1/maps" && return 0 ;;
+  esac
+  return 1
+}
+
+container_id_of() { # $1=pid -> 64-hex container id from cgroup (Docker, containerd, CRI-O, Podman)
+  grep -oE '[0-9a-f]{64}' "/proc/$1/cgroup" 2>/dev/null | tail -n1
+}
+
+container_name_of() { # $1=container id -> "runtime:name image" or pod/namespace (best effort, read-only API calls)
+  local id="$1" out=""
+  [ -n "$id" ] || return 0
+  if have crictl; then
+    out="$($TIMEOUT crictl inspect "$id" 2>/dev/null)"
+    if [ -n "$out" ]; then
+      local pod ns cname img
+      pod="$(printf '%s' "$out" | grep -m1 -oE '"io.kubernetes.pod.name": *"[^"]*"' | sed 's/.*: *"//; s/"$//')"
+      ns="$(printf '%s' "$out" | grep -m1 -oE '"io.kubernetes.pod.namespace": *"[^"]*"' | sed 's/.*: *"//; s/"$//')"
+      cname="$(printf '%s' "$out" | grep -m1 -oE '"io.kubernetes.container.name": *"[^"]*"' | sed 's/.*: *"//; s/"$//')"
+      img="$(printf '%s' "$out" | grep -m1 -oE '"image": *"[^"]*"' | sed 's/.*: *"//; s/"$//')"
+      [ -n "$pod" ] && { printf 'k8s pod %s/%s container %s image %s' "${ns:-?}" "$pod" "${cname:-?}" "${img:-?}"; return 0; }
+    fi
+  fi
   for rt in docker podman; do
     have "$rt" || continue
-    while IFS='|' read -r cid cimg; do
-      [ -n "$cid" ] || continue
-      r="$($TIMEOUT "$rt" exec "$cid" sh -c 'command -v php >/dev/null 2>&1 && php -r "echo PHP_VERSION,\"|\",ini_get(\"session.upload_progress.enabled\");"' 2>/dev/null)"
+    out="$($TIMEOUT "$rt" inspect --format '{{.Name}} image {{.Config.Image}}' "$id" 2>/dev/null)"
+    [ -n "$out" ] && { printf '%s %s' "$rt" "${out#/}"; return 0; }
+  done
+  return 0
+}
+
+ini_bool() { # normalise an ini boolean
+  local v; v="$(printf '%s' "$1" | tr -d '"'"'"' ;' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in 1|on|true|yes) echo "On" ;; 0|off|false|no|none|"") echo "Off" ;; *) echo "$1" ;; esac
+}
+
+if [ "$SCAN_CONTAINERS" -eq 1 ]; then
+  hr
+  say "Containers / pods on this host (read-only inspection via /proc/<pid>/root; nothing executed inside):"
+  declare -A NS_PIDS
+  for pid in "${!P_EXE[@]}"; do
+    [ "${P_HOST[$pid]:-1}" = "0" ] || continue
+    is_php_proc "$pid" || continue
+    ns="$(readlink "/proc/$pid/ns/mnt" 2>/dev/null)" || continue
+    NS_PIDS[$ns]="${NS_PIDS[$ns]:-} $pid"
+  done
+  [ ${#NS_PIDS[@]} -eq 0 ] && say "   no PHP processes found in containers"
+  for ns in "${!NS_PIDS[@]}"; do
+    # shellcheck disable=SC2206
+    pids=(${NS_PIDS[$ns]})
+    rep="$(printf '%s\n' "${pids[@]}" | sort -n | head -n1)"
+    root="/proc/$rep/root"
+    if [ ! -r "$root/" ]; then say "   [pid $rep] container root not readable (run as root)"; continue; fi
+    cid="$(container_id_of "$rep")"; cname="$(container_name_of "$cid")"
+    exe_in="${P_EXE[$rep]% (deleted)}"
+    env_blob=""
+    for q in "${pids[@]}"; do   # php-fpm overwrites its own environ (process title) - try all processes
+      e="$(tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null)"
+      case "$e" in *PHP_VERSION=*|*PHP_INI_DIR=*) env_blob="$e"; break ;; esac
+    done
+
+    # --- version (env -> headers -> package DB -> binary strings)
+    ver=""; vsrc=""
+    ver="$(printf '%s\n' "$env_blob" | sed -n 's/^PHP_VERSION=//p' | head -n1)"; [ -n "$ver" ] && vsrc="env PHP_VERSION"
+    if [ -z "$ver" ]; then
+      for h in "$root"/usr/local/include/php/main/php_version.h "$root"/usr/include/php*/php/main/php_version.h "$root"/usr/include/php/main/php_version.h; do
+        [ -r "$h" ] || continue
+        ver="$(sed -n 's/^#define PHP_VERSION "\(.*\)"/\1/p' "$h" | head -n1)"; [ -n "$ver" ] && { vsrc="php_version.h"; break; }
+      done
+    fi
+    pkg="unpackaged"; pver=""; porigin=""; pcl="n/a"
+    owner=""
+    if [ -d "$root/var/lib/dpkg/info" ]; then
+      owner="$(grep -lxF "$exe_in" "$root"/var/lib/dpkg/info/*.list 2>/dev/null | head -n1)"
+      owner="$(basename "${owner%.list}" 2>/dev/null)"; owner="${owner%%:*}"
+    fi
+    if [ -n "$owner" ] && [ -r "$root/var/lib/dpkg/status" ]; then
+      line="$(awk -v RS= -v P="$owner" '$0 ~ ("^Package: " P "\n") {v=$0; sub(/.*\nVersion: /,"",v); sub(/\n.*/,"",v); m=$0; if (m ~ /\nMaintainer: /) {sub(/.*\nMaintainer: /,"",m); sub(/\n.*/,"",m)} else m=""; print v"|"m; exit}' "$root/var/lib/dpkg/status" 2>/dev/null)"
+      pkg="$owner"; pver="${line%%|*}"; porigin="${line#*|}"
+      case "$pver" in *sury*) porigin="deb.sury.org ($porigin)";; esac
+      src="${pkg%-*}"; pcl="changelog-unavailable"
+      for d in "$root/usr/share/doc/$pkg" "$root/usr/share/doc/$src-common" "$root/usr/share/doc/$src"; do
+        if [ -r "$d/changelog.Debian.gz" ]; then
+          if zcat "$d/changelog.Debian.gz" 2>/dev/null | grep -qE 'CVE-2026-10961[89]'; then pcl="mentions-cve"; else pcl="not-mentioned"; fi
+          break
+        fi
+      done
+      [ -z "$ver" ] && { ver="$(printf '%s' "$pver" | sed -n 's/^\([0-9]*:\)\{0,1\}\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\2/p')"; vsrc="dpkg"; }
+    elif [ -r "$root/lib/apk/db/installed" ] && [ "${exe_in#/usr/local/}" = "$exe_in" ]; then
+      line="$(awk -v RS= '/\nP:php[0-9]+(-fpm|-cgi|-common)?\n/ {p=$0; sub(/.*\nP:/,"",p); sub(/\n.*/,"",p); v=$0; sub(/.*\nV:/,"",v); sub(/\n.*/,"",v); print p"|"v; exit}' "$root/lib/apk/db/installed" 2>/dev/null)"
+      if [ -n "$line" ]; then
+        pkg="${line%%|*}"; pver="${line#*|}"; porigin="alpine"; pcl="check-secdb"
+        [ -z "$ver" ] && { ver="${pver%%-r*}"; vsrc="apk"; }
+      fi
+    elif [ -d "$root/var/lib/rpm" ] && [ "${exe_in#/usr/local/}" = "$exe_in" ] && [ -z "$owner" ]; then
+      pkg="rpm-package"; porigin="rpm-based image"; pcl="unknown (rpm DB not read without executing rpm)"
+    fi
+    if [ -z "$ver" ] && [ -r "$root$exe_in" ]; then
+      ver="$(grep -a -m1 -oE 'X-Powered-By: PHP/[0-9]+\.[0-9]+\.[0-9]+' "$root$exe_in" 2>/dev/null | head -n1 | sed 's/.*PHP\///')"
+      [ -n "$ver" ] && vsrc="binary string"
+    fi
+    if [ -z "$ver" ]; then
+      for lp in "$root"/usr/lib/apache2/modules/libphp*.so "$root"/usr/lib64/httpd/modules/libphp*.so "$root"/usr/local/lib/libphp*.so; do
+        [ -r "$lp" ] || continue
+        ver="$(grep -a -m1 -oE 'X-Powered-By: PHP/[0-9]+\.[0-9]+\.[0-9]+' "$lp" 2>/dev/null | head -n1 | sed 's/.*PHP\///')"
+        [ -n "$ver" ] && { vsrc="libphp string"; break; }
+      done
+    fi
+    br="$(branch_of "$ver")"
+    case " $SUPPORTED_BRANCHES " in *" $br "*) bstate="upstream-supported" ;; *) bstate="upstream-EOL" ;; esac
+    [ -n "$ver" ] || bstate="unknown"
+    fs="$(fix_status "$ver" "$pcl" "$porigin" "$pkg")"
+    case "$fs" in patched*) ;; *) ANY_UNPATCHED=1 ;; esac
+
+    # --- session.upload_progress.enabled parsed from ini + pool files (last one wins; default On)
+    ini_dir="$(printf '%s\n' "$env_blob" | sed -n 's/^PHP_INI_DIR=//p' | head -n1)"
+    kind="cli"; case "$(basename "$exe_in")" in php-fpm*) kind="fpm" ;; php-cgi*) kind="cgi" ;; httpd|apache2) kind="apache2" ;; esac
+    files=(); layout="distro"
+    case "$exe_in" in /usr/local/*) layout="source-build" ;; esac
+    [ -n "$ini_dir" ] && layout="source-build"
+    if [ "$layout" = "source-build" ]; then   # official php images and other /usr/local builds
+      ini_dir="${ini_dir:-/usr/local/etc/php}"
+      files+=("$root$ini_dir/php.ini" "$root$ini_dir"/conf.d/*.ini)
+    else
+      files+=("$root/etc/php.ini" "$root"/etc/php.d/*.ini)
+      for d in "$root"/etc/php/*/"$kind"; do files+=("$d/php.ini" "$d"/conf.d/*.ini); done
+      for d in "$root"/etc/php[78]*; do [ -d "$d" ] && files+=("$d/php.ini" "$d"/conf.d/*.ini); done
+    fi
+    scan_env="$(printf '%s\n' "$env_blob" | sed -n 's/^PHP_INI_SCAN_DIR=//p' | head -n1)"
+    for d in ${scan_env//:/ }; do files+=("$root$d"/*.ini); done
+    pools=()
+    if [ "$kind" = "fpm" ]; then
+      if [ "$layout" = "source-build" ]; then
+        pools+=("$root"/usr/local/etc/php-fpm.d/*.conf)
+      else
+        pools+=("$root"/etc/php/*/fpm/pool.d/*.conf "$root"/etc/php-fpm.d/*.conf "$root"/etc/php[78]*/php-fpm.d/*.conf)
+      fi
+    fi
+    upe="On"; upsrc="PHP default"; seen=" "; cfgfiles=()
+    for f in "${files[@]}" "${pools[@]+"${pools[@]}"}"; do
+      [ -f "$f" ] || continue
+      case "$seen" in *" $f "*) continue ;; esac; seen="$seen$f "
+      cfgfiles+=("$f")
+      v="$(grep -E '^[[:space:]]*(session\.upload_progress\.enabled[[:space:]]*=|php(_admin)?_(value|flag)\[session\.upload_progress\.enabled\][[:space:]]*=)' "$f" 2>/dev/null | tail -n1 | sed 's/^[^=]*=[[:space:]]*//')"
+      [ -n "$v" ] && { upe="$(ini_bool "$v")"; upsrc="${f#"$root"}"; }
+    done
+
+    # --- running state of this container's PHP processes
+    nm="$(newest_mtime "${cfgfiles[@]+"${cfgfiles[@]}"}")"
+    eval_family "${nm%%|*}" "${nm#*|}" "${pids[@]}"
+    STATE_TEXT="${STATE_TEXT//$root/}"
+    [ "${STATE_TEXT%%:*}" = "STALE" ] && ANY_STALE=1
+
+    NPHP=$((NPHP+1))
+    if [ -n "$cname" ]; then label_c="$cname${cid:+ (id ${cid:0:12})}"
+    elif [ -n "$cid" ]; then label_c="id ${cid:0:12}"
+    else label_c="unidentified (mount namespace ${ns#mnt:})"; fi
+    say "   Container: $label_c"
+    say "      Process  : $(basename "$exe_in") x${#pids[@]} (host pid $rep, path in container $exe_in, layout $layout)"
+    say "      Version  : ${ver:-unknown}${vsrc:+ (from $vsrc)}   branch ${br:-?}: $bstate"
+    say "      Package  : $pkg ${pver} ${porigin:+[$porigin]}"
+    say "      Fix      : $fs"
+    say "      upload_progress.enabled: $upe (set in: $upsrc; parsed from files, not executed)"
+    say "      Running  : $STATE_TEXT"
+    CONT_JSON+=("{\"container_id\":$(json_str "$cid"),\"name\":$(json_str "$cname"),\"host_pid\":$rep,\"processes\":${#pids[@]},\"binary\":$(json_str "$exe_in"),\"version\":$(json_str "$ver"),\"version_source\":$(json_str "$vsrc"),\"branch_state\":$(json_str "$bstate"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"upload_progress_enabled\":$(json_str "$upe"),\"upload_progress_source\":$(json_str "$upsrc"),\"runtime_state\":${STATE_JSON//$root/}}")
+  done
+fi
+
+# Optional: exact values via docker/podman exec (executes php inside the container)
+if [ "$CONTAINER_EXEC" -eq 1 ]; then
+  hr
+  say "Container exec check (php -r inside each running Docker/Podman container; CLI values):"
+  for rt in docker podman; do
+    have "$rt" || continue
+    while IFS='|' read -r cid2 cimg; do
+      [ -n "$cid2" ] || continue
+      r="$($TIMEOUT "$rt" exec "$cid2" sh -c 'command -v php >/dev/null 2>&1 && php -r "echo PHP_VERSION,\"|\",ini_get(\"session.upload_progress.enabled\");"' 2>/dev/null)"
       [ -n "$r" ] || continue
-      say "   [$rt] $cid $cimg -> PHP ${r%%|*}, session.upload_progress.enabled=${r#*|}"
-      CONT_JSON+=("{\"runtime\":$(json_str "$rt"),\"id\":$(json_str "$cid"),\"image\":$(json_str "$cimg"),\"php_version\":$(json_str "${r%%|*}"),\"upload_progress_enabled\":$(json_str "${r#*|}")}")
-      NPHP=$((NPHP+1)); ANY_UNPATCHED=1
+      say "   [$rt] $cid2 $cimg -> PHP ${r%%|*}, session.upload_progress.enabled=${r#*|}"
+      CONT_JSON+=("{\"exec_runtime\":$(json_str "$rt"),\"container_id\":$(json_str "$cid2"),\"image\":$(json_str "$cimg"),\"version\":$(json_str "${r%%|*}"),\"upload_progress_enabled_cli\":$(json_str "${r#*|}")}")
     done < <("$rt" ps --format '{{.ID}}|{{.Image}}' 2>/dev/null)
   done
-  [ ${#CONT_JSON[@]} -eq 0 ] && say "   no running container with PHP found"
 fi
 
 # --------------------------------------------------------------------------
