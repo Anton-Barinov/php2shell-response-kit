@@ -124,6 +124,7 @@ fatal_error_backtraces = 0             ; PHP 8.5 only
 | `fatal_error_backtraces = 0` | PHP 8.5 only (php.net) | Restart workers afterwards. |
 | `session.use_strict_mode = 1` | **Not a mitigation** (our lab, §9) | Still good hygiene. |
 | WAF / ModSecurity | **Hunting + body limits** | The recommended `SecRequestBodyNoFilesLimit 131072` + `SecRequestBodyLimitAction Reject` rejected PHP's regression-test body in our lab. Rules 9109622/23 log part-header floods and body errors. |
+| Web-server allow-list: only existing, intended `.php` entry points reach PHP; `LimitRequestBody` / `client_max_body_size`; `GET`/`HEAD` only where no forms exist | **Effective, low cost** (§9a) | PHP-FPM parses bodies even for non-existent scripts. Apache: `<If "! -f %{REQUEST_FILENAME}">Require all denied</If>` in a `.php` `FilesMatch`; nginx: `try_files $uri =404;`. If PHP only serves a contact form, consider stopping PHP until the fixed package is installed. |
 | Restrict exposure (VPN/IP allow-list, take admin panels offline, isolate EOL hosts) | Effective risk reduction | CERT-EU advises isolating internet-facing applications until fixed. |
 | Least privilege for the PHP user, egress filtering, read-only web roots | Limits impact | Recommended by Flatt Security; also reduces webshell persistence. |
 | Patch | **The fix** | 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 upstream; distribution timing see §7. Restart workers. |
@@ -214,6 +215,14 @@ of unpatched 8.3.35 and patched 8.3.36 (php-cgi). No exploit code was written or
   8.3.35 php-cgi: default settings → `Allowed memory size of 134217728 bytes exhausted … in Unknown on line 0`;
   `post_max_size=8M` → same; `session.upload_progress.enabled=0` → same; `memory_limit=-1` → request
   completes (≈218 MB peak in the debug build). Patched 8.3.36 with default settings: ≈2 MB peak.
+* **PHP-FPM parses the request body even when the script does not exist.** Unpatched 8.3.35 php-fpm
+  (unix socket, lab only): a multipart request with an upload-progress field to a missing `.php` wrote the
+  session file and then answered `404 File not found`; PHP's regression-test body sent to a missing `.php`
+  produced `Allowed memory size … in Unknown on line 0` and the worker exited. With Apache
+  `SetHandler "proxy:unix:…|fcgi://…"` (RHEL/Rocky default `php.conf`) or nginx `fastcgi_pass` without
+  `try_files`, **any `/random.php` URL reaches PHP**. Fix at the web server: deny `.php` that does not exist
+  (Apache `<If "! -f %{REQUEST_FILENAME}">Require all denied</If>` inside `<FilesMatch "\.php$">`, nginx
+  `try_files $uri =404;`) and allow-list the PHP entry points you really use.
 * Limits of this test: debug + ASan builds (memory accounting differs from release builds); single-request
   CGI — the cross-request reuse (CVE-2026-109619) in persistent workers was not reproduced.
 
@@ -227,7 +236,8 @@ We tested the *mechanism* Flatt Security pointed to — not the vulnerability:
   does not stop the mechanism.
 * With `session.upload_progress.enabled=0` no session file was created.
 * With the default `session.upload_progress.cleanup=On` the session file remained as an empty file.
-* A request to a non-existent `.php` path (404) did not trigger it — any *reachable* PHP script does.
+* A request to a non-existent `.php` path (404) did not trigger it **with mod_php and the built-in server**,
+  where the web server checks the file first. **This does not hold for PHP-FPM behind a proxy handler** — see §9a.
 * ModSecurity 2.9: log rules fired only for multipart requests carrying the field; normal uploads were
   not flagged; the blocking variant returned 403.
 * ModSecurity 2.9.7 (v1.3.0): 9109622 fired for multipart requests with 1,000 part-header lines (file and

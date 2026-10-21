@@ -7,6 +7,13 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.2 — 2026-10-21
+* README (EN/TR): **correction** — the pre-disclosure lab note "a non-existent `.php` path does not trigger it"
+  applies to mod_php / built-in server only. Lab test: unpatched PHP-FPM parses the request body (upload
+  progress, out-of-memory) even for a missing script, so `/random.php` reaches PHP behind Apache
+  `SetHandler proxy:fcgi` or nginx `fastcgi_pass` without `try_files`. Added the web-server allow-list
+  mitigation (existing + intended entry points only, body limits, GET/HEAD-only where possible).
+
 ## v1.3.1 — 2026-10-21
 * **Fix (Linux):** on RHEL/Rocky with Remi packages the script reported "Apache httpd loads mod_php" when
   `15-php.conf` contained the `LoadModule` line inside `<IfModule mpm_prefork_module>` while httpd ran

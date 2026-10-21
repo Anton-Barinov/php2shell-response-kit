@@ -124,6 +124,7 @@ fatal_error_backtraces = 0             ; yalnızca PHP 8.5
 | `fatal_error_backtraces = 0` | Yalnızca PHP 8.5 (php.net) | Sonrasında worker'ları yeniden başlatın. |
 | `session.use_strict_mode = 1` | **Azaltım değil** (lab notlarımız, §9) | Yine de iyi bir hijyen ayarı. |
 | WAF / ModSecurity | **Avlama + gövde sınırları** | Önerilen `SecRequestBodyNoFilesLimit 131072` + `SecRequestBodyLimitAction Reject` ayarı lab'ımızda PHP'nin regresyon testi gövdesini reddetti. 9109622/23 kuralları part-başlık selini ve gövde hatalarını loglar. |
+| Web sunucusu izin listesi: PHP'ye yalnızca mevcut ve kullanılan `.php` giriş noktaları ulaşsın; `LimitRequestBody` / `client_max_body_size`; form olmayan yerlerde yalnızca `GET`/`HEAD` | **Etkili, düşük maliyetli** (§9a) | PHP-FPM, var olmayan script'ler için de gövdeyi ayrıştırıyor. Apache: `.php` `FilesMatch` içinde `<If "! -f %{REQUEST_FILENAME}">Require all denied</If>`; nginx: `try_files $uri =404;`. PHP yalnızca bir iletişim formu için varsa, yamalı paket gelene kadar PHP'yi durdurmayı düşünün. |
 | Maruziyeti kısıtlama (VPN/IP izin listesi, yönetim panellerini kapatma, EOL sunucuları izole etme) | Etkili risk azaltımı | CERT-EU, yama gelene kadar internete açık uygulamaların izole edilmesini öneriyor. |
 | PHP kullanıcısı için en az yetki, çıkış (egress) filtreleme, salt okunur web kökleri | Etkiyi sınırlar | Flatt Security de öneriyor; webshell kalıcılığını da zorlaştırır. |
 | Yama | **Çözüm** | Upstream 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12; dağıtım zamanlaması §7. Worker'ları yeniden başlatın. |
@@ -214,6 +215,14 @@ debug + ASan build'lerinde (php-cgi) çalıştırıldı. Exploit kodu yazılmad�
   php-cgi: varsayılan ayarlar → `Allowed memory size of 134217728 bytes exhausted … in Unknown on line 0`;
   `post_max_size=8M` → aynı; `session.upload_progress.enabled=0` → aynı; `memory_limit=-1` → istek tamamlandı
   (debug build'de ≈218 MB tepe). Yamalı 8.3.36, varsayılan ayarlarla: ≈2 MB tepe.
+* **PHP-FPM, script mevcut olmasa bile istek gövdesini ayrıştırıyor.** Yamasız 8.3.35 php-fpm (unix socket, yalnızca lab):
+  upload-progress alanı içeren multipart istek var olmayan bir `.php`'ye gönderildiğinde session dosyası yazıldı, ardından
+  `404 File not found` döndü; PHP'nin regresyon testi gövdesi var olmayan `.php`'ye gönderildiğinde
+  `Allowed memory size … in Unknown on line 0` oluştu ve worker kapandı. Apache `SetHandler "proxy:unix:…|fcgi://…"`
+  (RHEL/Rocky varsayılan `php.conf`) veya `try_files` olmadan nginx `fastcgi_pass` ile **herhangi bir `/rastgele.php` adresi
+  PHP'ye ulaşır**. Çözüm web sunucusunda: var olmayan `.php`'yi reddedin (Apache: `<FilesMatch "\.php$">` içinde
+  `<If "! -f %{REQUEST_FILENAME}">Require all denied</If>`, nginx: `try_files $uri =404;`) ve gerçekten kullandığınız PHP
+  giriş noktalarını izin listesine alın.
 * Testin sınırları: debug + ASan build'ler (bellek hesabı release build'lerden farklı); tek istekli CGI —
   kalıcı worker'larda istekler arası yeniden kullanım (CVE-2026-109619) yeniden üretilmedi.
 
@@ -225,7 +234,8 @@ Flatt Security'nin işaret ettiği *mekanizmayı* test ettik — açığın kend
 * `session.use_strict_mode=On` iken PHP ilerleme verisini yine yazdı, yalnızca rastgele bir ID ile → strict mode mekanizmayı durdurmuyor.
 * `session.upload_progress.enabled=0` iken session dosyası oluşmadı.
 * Varsayılan `session.upload_progress.cleanup=On` ile session dosyası boş olarak kaldı.
-* Var olmayan bir `.php` yoluna (404) yapılan istek mekanizmayı tetiklemedi — *erişilebilir* her PHP script'i tetikliyor.
+* Var olmayan bir `.php` yoluna (404) yapılan istek mekanizmayı **mod_php ve yerleşik sunucuda** tetiklemedi; orada web
+  sunucusu önce dosyayı kontrol ediyor. **Proxy handler arkasındaki PHP-FPM için bu geçerli değil** — bkz. §9a.
 * ModSecurity 2.9: log kuralları yalnızca alanı taşıyan multipart isteklerde tetiklendi; normal yüklemeler işaretlenmedi; engelleme varyantı 403 döndü.
 * ModSecurity 2.9.7 (v1.3.0): 9109622, 1.000 part-başlık satırı içeren multipart isteklerde (dosyalı ve dosyasız part) tetiklendi, normal yüklemede tetiklenmedi; PHP'nin 3 MB'lık regresyon testi gövdesi, önerilen gövde sınırı yapılandırması tarafından PHP'ye ulaşmadan reddedildi (HTTP 400).
 
