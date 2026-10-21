@@ -241,6 +241,8 @@ Mapping to the ORBITRON php2shell-response-kit (public repo):
 
 All SIEM/EDR queries are generated with pySigma and are untested on live platforms; the scripts, YARA and ModSecurity rules were lab-tested. Baseline 1–2 hours before alerting.
 
+**Correlation limitation:** the repository rules Wazuh 109628 and 109631 tie the OOM and the later event by a **time window, not by worker PID**. Do not report their matches as "OOM confirmed on this exact worker" — exact process attribution needs PID/pool correlation you add on your platform. The priority recommendations in this guide do not change the existing rule levels.
+
 ## Interim mitigations, patch verification and sources
 
 **Priority:** apply your distribution's package that fixes both CVEs (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 or a vendor backport), restart the relevant services and **long-lived workers**. Verify the running processes use the patched version. Do patch verification via the package record, the vendor advisory and the running process — log signatures such as A4 are not reliable for this.

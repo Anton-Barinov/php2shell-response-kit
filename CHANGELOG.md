@@ -7,6 +7,11 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.7 — 2026-10-21
+* docs (EN + TR): added a correlation-limitation note — Wazuh 109628/109631 tie the OOM and the later event
+  by time window, not worker PID, so their matches must not be reported as "OOM confirmed on this exact worker."
+* README: noted that the branded PDF edition's doc-control version (v1.2) maps to this repo guide.
+
 ## v1.3.6 — 2026-10-21
 * docs (EN + TR): sharpened the A4 signature to its agreed one-directional framing — unreliable for attack
   detection (invisible in the real valid-SID / writable-save_path flow), meaningful as a version indicator

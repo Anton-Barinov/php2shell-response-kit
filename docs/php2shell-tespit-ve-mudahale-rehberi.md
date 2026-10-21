@@ -241,6 +241,8 @@ ORBITRON php2shell-response-kit (public repo) karşılıkları:
 
 Tüm SIEM/EDR sorguları pySigma ile üretilmiştir ve canlı platformlarda test edilmemiştir; script'ler, YARA ve ModSecurity kuralları lab'da test edildi. Alarm açmadan önce 1–2 saat baseline alın.
 
+**Korelasyon sınırı:** Repo'daki Wazuh 109628 ve 109631 kuralları, OOM ile sonraki olayı **zaman penceresiyle ilişkilendirir, worker PID'siyle değil**. Bu kuralların eşleşmesini "OOM tam bu worker'da doğrulandı" diye raporlamayın — kesin süreç ataması, platformunuzda ekleyeceğiniz PID/pool korelasyonunu gerektirir. Bu rehberdeki öncelik önerileri mevcut kural seviyelerini değiştirmez.
+
 ## Geçici önlemler, yama doğrulama ve kaynaklar
 
 **Öncelik:** Dağıtımınızın iki CVE'yi gideren paketini uygulayın (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 veya vendor backport'u), ilgili servisleri ve **uzun ömürlü worker'ları yeniden başlatın**. Çalışan süreçlerin yamalı sürümü kullandığını doğrulayın. Yama doğrulamasını paket kaydı, üretici duyurusu ve çalışan süreç üzerinden yapın — A4 gibi log imzaları bunun için güvenilir değildir.
