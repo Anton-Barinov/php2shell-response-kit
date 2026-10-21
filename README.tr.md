@@ -131,6 +131,8 @@ fatal_error_backtraces = 0             ; yalnızca PHP 8.5
 
 ## 6. Tespit ve izleme kuralları
 
+Ayrıntılı tespit ve müdahale saha rehberi (log örnekleri, SAPI farkları, korelasyon): [docs/php2shell-tespit-ve-mudahale-rehberi.md](docs/php2shell-tespit-ve-mudahale-rehberi.md).
+
 Yama artık açık olduğu için burada iki tür kural var: **tetikleme koşulu** kuralları (PHP bir isteği
 ayrıştırırken belleği tükendi — açığın ihtiyaç duyduğu durum — ve WAF'ta part-başlık seli) ve saldırganın kod
 çalıştırdıktan *sonra* yaptıklarını yakalayan **davranışsal** kurallar.

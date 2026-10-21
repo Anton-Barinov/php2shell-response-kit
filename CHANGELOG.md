@@ -7,6 +7,11 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.4 — 2026-10-21
+* Added a detailed detection & response field guide (EN + TR) under `docs/`, linked from the README:
+  root cause, SAPI differences, lab verification matrix, trigger signatures with real log examples,
+  compromise indicators (incl. FPM code 70), correlation logic and the rule mapping.
+
 ## v1.3.3 — 2026-10-21
 * **New rule (lab finding):** on PHP-FPM an out-of-memory during request start-up does not crash the worker
   with a signal — the worker exits cleanly with **code 70** (FPM_EXIT_SOFTWARE). This is the most common

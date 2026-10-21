@@ -131,6 +131,8 @@ fatal_error_backtraces = 0             ; PHP 8.5 only
 
 ## 6. Detection & monitoring rules
 
+Detailed detection & response field guide (log examples, SAPI differences, correlation): [docs/php2shell-detection-and-response-guide.md](docs/php2shell-detection-and-response-guide.md).
+
 Since the fix is public, there are two kinds of rules here: **trigger-condition** rules (PHP ran out of
 memory while parsing a request — the state the bug needs — and part-header floods at the WAF), and
 **behavioural** rules for what an attacker does *after* code execution.
