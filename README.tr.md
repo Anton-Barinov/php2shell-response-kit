@@ -131,7 +131,7 @@ fatal_error_backtraces = 0             ; yalnızca PHP 8.5
 
 ## 6. Tespit ve izleme kuralları
 
-Ayrıntılı tespit ve müdahale saha rehberi (log örnekleri, SAPI farkları, korelasyon): [docs/php2shell-tespit-ve-mudahale-rehberi.md](docs/php2shell-tespit-ve-mudahale-rehberi.md). Markalı PDF sürümünün doküman-kontrol numarası (v1.2) bu repo rehberine karşılık gelir; repo Markdown'ı daha sonraki küçük düzeltmeleri taşıyabilir.
+Ayrıntılı tespit ve müdahale saha rehberi (log örnekleri, SAPI farkları, korelasyon): [docs/php2shell-tespit-ve-mudahale-rehberi.md](docs/php2shell-tespit-ve-mudahale-rehberi.md). Markalı PDF sürümünün doküman-kontrol numarası (v1.2) bu repo rehberine karşılık gelir; repo Markdown'ı daha sonraki küçük düzeltmeleri taşıyabilir. Markalı PDF sürümleri: [EN](docs/ORBITRON_php2shell_EN_v1.2.pdf) · [TR](docs/ORBITRON_php2shell_TR_v1.2.pdf).
 
 Yama artık açık olduğu için burada iki tür kural var: **tetikleme koşulu** kuralları (PHP bir isteği
 ayrıştırırken belleği tükendi — açığın ihtiyaç duyduğu durum — ve WAF'ta part-başlık seli) ve saldırganın kod
