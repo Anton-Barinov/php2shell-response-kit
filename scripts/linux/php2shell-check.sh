@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.2.1  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.2.2  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -31,7 +31,7 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
 # Fixed upstream versions. EMPTY until the official PHP advisory is published
@@ -238,7 +238,7 @@ fix_status() { # $1=upstream version $2=changelog status $3=package origin $4=pa
 # started with until a reload/restart.
 # --------------------------------------------------------------------------
 NOW_EPOCH="$(date +%s)"
-declare -A P_PPID P_START P_EXE P_HOST
+declare -A P_PPID=() P_START=() P_EXE=() P_HOST=()
 if have ps; then
   while read -r pid ppid et; do
     [ -n "$pid" ] || continue
@@ -286,7 +286,7 @@ runtime_state() { # $1=match mode (bin|apache|none) $2=binary $3=php.ini $4=scan
 
   # matching processes (host mount namespace only)
   local pid exe base fam=()
-  for pid in "${!P_EXE[@]}"; do
+  for pid in ${P_EXE[@]+"${!P_EXE[@]}"}; do
     exe="${P_EXE[$pid]}"; [ -n "$exe" ] || continue
     [ "${P_HOST[$pid]:-1}" = "1" ] || continue
     base="$(basename "${exe% (deleted)}")"
@@ -542,15 +542,16 @@ ini_bool() { # normalise an ini boolean
 if [ "$SCAN_CONTAINERS" -eq 1 ]; then
   hr
   say "Containers / pods on this host (read-only inspection via /proc/<pid>/root; nothing executed inside):"
-  declare -A NS_PIDS
-  for pid in "${!P_EXE[@]}"; do
+  declare -A NS_PIDS=()
+  for pid in ${P_EXE[@]+"${!P_EXE[@]}"}; do
     [ "${P_HOST[$pid]:-1}" = "0" ] || continue
     is_php_proc "$pid" || continue
     ns="$(stat -L -c '%d:%i' "/proc/$pid/root/" 2>/dev/null)" || continue   # group by container root
     NS_PIDS[$ns]="${NS_PIDS[$ns]:-} $pid"
   done
   [ ${#NS_PIDS[@]} -eq 0 ] && say "   no PHP processes found in containers"
-  for ns in "${!NS_PIDS[@]}"; do
+  # "${!arr[@]}+" guard: bash < 4.4 treats an empty array as unset under set -u
+  for ns in ${NS_PIDS[@]+"${!NS_PIDS[@]}"}; do
     # shellcheck disable=SC2206
     pids=(${NS_PIDS[$ns]})
     rep="$(printf '%s\n' "${pids[@]}" | sort -n | head -n1)"

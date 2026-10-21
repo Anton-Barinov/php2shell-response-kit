@@ -7,6 +7,11 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.2.2 — 2026-10-21 14:00 TRT
+* **Fix (Linux):** on hosts without any PHP container the container section aborted with
+  `NS_PIDS: unbound variable` (`set -u` with an empty associative array). Arrays are now initialised and
+  empty-array loops are guarded (also for bash < 4.4). Found on a Rocky Linux 10.2 production host.
+
 ## v1.2.1 — 2026-10-21 14:00 TRT
 * **Fix (Linux, regression in v1.2.0):** v1.2.0 treated every process in another mount namespace as a
   container. systemd services with `PrivateTmp=`/`ProtectSystem=` (php-fpm and httpd on RHEL/Rocky and Debian)
