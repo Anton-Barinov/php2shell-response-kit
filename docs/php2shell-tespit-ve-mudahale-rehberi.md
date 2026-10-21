@@ -124,7 +124,7 @@ Bu da yamalı/yamasız ayırt etmez; vektörün denendiğini gösterir.
 ```
 PHP Warning:  PHP Request Startup: Failed to write session data (files) ... in Unknown on line 0
 ```
-Bu satır yamalı sürümde **üretilmez** (test diff'iyle doğrulandı): yamasız PHP okuma başarısızken bile yazmayı dener. **Ancak kritik sınırlama:** bu satır yalnızca **yazma da başarısız olursa** (geçersiz SID veya yazılamayan `save_path`) çıkar. Gerçek bir sunucuda `save_path` yazılabilir ve saldırgan **geçerli** bir SID seçerse, yamasız sürüm bayat state'i **sessizce, başarıyla yazar — A4 satırı hiç çıkmaz.** Bu nedenle A4, "yamasız PHP var" için **güvenilir bir envanter sinyali değildir**; yalnızca geçersiz-SID probu veya bozuk save_path durumunda ortaya çıkar. Envanter ve yama doğrulaması için paket sürümünü/changelog'u kullanın.
+Bu satır yamalı sürümde **üretilmez** (test diff'iyle doğrulandı): yamasız PHP okuma başarısızken bile yazmayı dener. **Ancak kritik sınırlama:** bu satır yalnızca **yazma da başarısız olursa** (geçersiz SID veya yazılamayan `save_path`) çıkar. Gerçek bir sunucuda `save_path` yazılabilir ve saldırgan **geçerli** bir SID seçerse, yamasız sürüm bayat state'i **sessizce, başarıyla yazar — A4 satırı hiç çıkmaz.** Bu nedenle A4 **tek yönlüdür**: (a) saldırı tespitinde güvenilmez — gerçek akışta (geçerli SID + yazılabilir save_path) hiç görünmez; (b) sürüm göstergesi olarak yalnızca tek yönde anlamlıdır — **varsa** zafiyetli sürüm + bozuk yazma yolu demektir, **yokluğu hiçbir şey kanıtlamaz**; (c) envanter/yama doğrulaması için kullanılmaz. Envanter ve yama doğrulaması için paket sürümünü/changelog'u kullanın.
 
 ### A5 — Content-Length / limit bypass denemeleri
 ```

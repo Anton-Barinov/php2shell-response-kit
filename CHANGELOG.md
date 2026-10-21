@@ -7,6 +7,12 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.6 — 2026-10-21
+* docs (EN + TR): sharpened the A4 signature to its agreed one-directional framing — unreliable for attack
+  detection (invisible in the real valid-SID / writable-save_path flow), meaningful as a version indicator
+  only in one direction (presence => vulnerable + broken write path; absence proves nothing), and not for
+  inventory/patch verification (use the package changelog).
+
 ## v1.3.5 — 2026-10-21
 * docs (EN + TR): added a "traffic and access-log footprint" section — the access-log hole (a request that
   dies at request start-up leaves an error-log line but no access-log entry; lab-re-confirmed with
