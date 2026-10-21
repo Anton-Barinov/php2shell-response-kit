@@ -1,0 +1,408 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  ORBITRON php2shell exposure checker (Linux)        v1.0.0  (2026-10-21)
+#  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
+#
+#  READ-ONLY. This script does not change configuration, does not install
+#  anything, does not open network connections and does not test for the
+#  vulnerability. It inventories PHP runtimes and reports:
+#    - PHP binaries / SAPIs (CLI, FPM, CGI, LiteSpeed, mod_php)
+#    - effective session.upload_progress.* and related settings per SAPI
+#    - per-pool / per-directory / web-server level overrides of those settings
+#    - owning package, repository origin and whether the package changelog
+#      already mentions the CVE IDs (distribution backport detection)
+#    - running PHP / web server processes
+#    - optionally (--containers) PHP inside running Docker/Podman containers
+#
+#  Usage:  sudo ./php2shell-check.sh [--json] [-o report.json]
+#                                    [--webroot DIR]... [--containers]
+#  Exit codes: 0 = no PHP found, 1 = PHP found and every runtime confirmed
+#              patched, 2 = PHP found and at least one runtime NOT confirmed
+#              patched, 3 = usage error.
+#
+#  License: MIT. Provided as-is, without warranty. Review before running.
+# =============================================================================
+
+set -u
+LC_ALL=C; export LC_ALL
+
+SCRIPT_VERSION="1.0.0"
+CVES="CVE-2026-109618 CVE-2026-109619"
+
+# Fixed upstream versions. EMPTY until the official PHP advisory is published
+# (scheduled 2026-10-21 14:00 UTC). Fill in, e.g. "8.2.35 8.3.36 8.4.27 8.5.12",
+# ONLY from https://www.php.net/ - rumoured numbers must not be used here.
+FIXED_UPSTREAM="${PHP2SHELL_FIXED_UPSTREAM:-}"
+
+# Branches that receive upstream security fixes (php.net/supported-versions).
+SUPPORTED_BRANCHES="8.2 8.3 8.4 8.5"
+
+JSON_ONLY=0
+OUT_FILE=""
+SCAN_CONTAINERS=0
+WEBROOTS=()
+
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) JSON_ONLY=1 ;;
+    -o|--output) shift; OUT_FILE="${1:-}"; [ -n "$OUT_FILE" ] || { usage; exit 3; } ;;
+    --webroot) shift; [ -n "${1:-}" ] || { usage; exit 3; }; WEBROOTS+=("$1") ;;
+    --containers) SCAN_CONTAINERS=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 3 ;;
+  esac
+  shift
+done
+
+if [ ${#WEBROOTS[@]} -eq 0 ]; then
+  WEBROOTS=(/var/www /srv /usr/share/nginx /home /opt/bitnami)
+fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+TIMEOUT=""; have timeout && TIMEOUT="timeout 15"
+
+say() { [ "$JSON_ONLY" -eq 1 ] || printf '%s\n' "$*"; }
+hr()  { say "------------------------------------------------------------------------------"; }
+
+json_str() {
+  # JSON string escape (backslash, quote, control characters)
+  [ -n "$1" ] || { printf '""'; return; }
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' \
+    | awk 'BEGIN{ORS=""} NR>1{print "\\n"} {print}' | sed 's/^/"/; s/$/"/'
+}
+
+ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+
+# --------------------------------------------------------------------------
+# Host facts
+# --------------------------------------------------------------------------
+HOSTNAME_S="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)"
+OS_NAME="unknown"; OS_ID=""; OS_LIKE=""
+if [ -r /etc/os-release ]; then
+  # shellcheck disable=SC1091
+  OS_NAME="$(. /etc/os-release; echo "${PRETTY_NAME:-$NAME}")"
+  OS_ID="$(. /etc/os-release; echo "${ID:-}")"
+  OS_LIKE="$(. /etc/os-release; echo "${ID_LIKE:-}")"
+fi
+PKG_FAMILY="other"
+case " $OS_ID $OS_LIKE " in
+  *" rhel "*|*" fedora "*|*" centos "*|*" rocky "*|*" almalinux "*|*" ol "*|*" amzn "*|*" cloudlinux "*) PKG_FAMILY="rpm" ;;
+  *" debian "*|*" ubuntu "*) PKG_FAMILY="deb" ;;
+  *" alpine "*) PKG_FAMILY="apk" ;;
+  *" suse "*|*" sles "*|*" opensuse "*) PKG_FAMILY="rpm" ;;
+esac
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+[ "$(id -u)" -eq 0 ] || say "WARNING: not running as root - some configs/changelogs may be unreadable."
+
+# --------------------------------------------------------------------------
+# 1. Discover PHP binaries
+# --------------------------------------------------------------------------
+CANDIDATES=()
+for p in /usr/bin/php* /usr/sbin/php-fpm* /usr/bin/php-cgi* /usr/local/bin/php* /usr/local/sbin/php-fpm* \
+         /opt/remi/php*/root/usr/bin/php* /opt/remi/php*/root/usr/sbin/php-fpm* \
+         /opt/rh/rh-php*/root/usr/bin/php* /opt/rh/rh-php*/root/usr/sbin/php-fpm* \
+         /opt/cpanel/ea-php*/root/usr/bin/php* /opt/cpanel/ea-php*/root/usr/sbin/php-fpm* \
+         /opt/plesk/php/*/bin/php* /opt/plesk/php/*/sbin/php-fpm* \
+         /opt/alt/php*/usr/bin/php* /opt/alt/php*/usr/sbin/php-fpm* \
+         /usr/local/lsws/lsphp*/bin/lsphp /usr/local/lsws/lsphp*/bin/php \
+         /opt/bitnami/php/bin/php* /opt/bitnami/php/sbin/php-fpm* \
+         /www/server/php/*/bin/php* /www/server/php/*/sbin/php-fpm*; do
+  [ -f "$p" ] && [ -x "$p" ] || continue
+  b="$(basename "$p")"
+  case "$b" in
+    php|php[0-9]*|php-fpm|php-fpm[0-9]*|php-cgi|php-cgi[0-9]*|lsphp|lsphp[0-9]*) ;;
+    *) continue ;;
+  esac
+  case "$b" in *config*|*ize*|*dbg*) continue ;; esac
+  CANDIDATES+=("$p")
+done
+for c in php php-fpm php-cgi lsphp; do
+  have "$c" && CANDIDATES+=("$(command -v "$c")")
+done
+# binaries of running processes (catches custom builds in odd paths)
+if [ -d /proc ]; then
+  for exe in /proc/[0-9]*/exe; do
+    t="$(readlink "$exe" 2>/dev/null)" || continue
+    case "$(basename "$t")" in php|php[0-9]*|php-fpm*|php-cgi*|lsphp*) CANDIDATES+=("$t") ;; esac
+  done
+fi
+
+BINARIES=()
+SEEN=" "
+for c in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
+  r="$(readlink -f "$c" 2>/dev/null || echo "$c")"
+  r="${r% (deleted)}"
+  [ -x "$r" ] || continue
+  case "$SEEN" in *" $r "*) continue ;; esac
+  SEEN="$SEEN$r "
+  BINARIES+=("$r")
+done
+
+# --------------------------------------------------------------------------
+# helpers to read effective settings
+# --------------------------------------------------------------------------
+KEYS="session.upload_progress.enabled session.upload_progress.cleanup session.upload_progress.name session.upload_progress.prefix session.use_strict_mode session.save_handler session.save_path file_uploads cgi.fix_pathinfo"
+
+# normalise phpinfo (text or HTML) to "key => local => master" lines
+phpinfo_norm() {
+  sed -e 's#</td><td[^>]*>#  => #g' -e 's/<[^>]*>//g' -e 's/&nbsp;/ /g' -e 's/&quot;/"/g' \
+      -e 's/[[:space:]]\{1,\}=>/ =>/g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+info_get() { # $1=normalised info, $2=key -> local value
+  printf '%s\n' "$1" | awk -F' => ' -v k="$2" '$1==k {print $2; exit}'
+}
+
+pkg_info() { # $1=path -> "pkg|version|origin|changelog_status"
+  local f="$1" pkg="" ver="" origin="" cl="unknown"
+  if have rpm && rpm -qf "$f" >/dev/null 2>&1; then
+    pkg="$(rpm -qf --qf '%{NAME}' "$f" 2>/dev/null)"
+    ver="$(rpm -qf --qf '%{VERSION}-%{RELEASE}' "$f" 2>/dev/null)"
+    origin="$(rpm -qf --qf '%{VENDOR}' "$f" 2>/dev/null)"
+    case "$ver" in *remi*) origin="Remi ($origin)";; esac
+    if rpm -q --changelog "$pkg" 2>/dev/null | grep -qE 'CVE-2026-10961[89]'; then cl="mentions-cve"; else cl="not-mentioned"; fi
+  elif have dpkg-query && dpkg -S "$f" >/dev/null 2>&1; then
+    pkg="$(dpkg -S "$f" 2>/dev/null | head -n1 | cut -d: -f1)"
+    ver="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
+    origin="$(dpkg-query -W -f='${Maintainer}' "$pkg" 2>/dev/null)"
+    case "$ver" in *sury*) origin="deb.sury.org ($origin)";; esac
+    local src; src="$(dpkg-query -W -f='${source:Package}' "$pkg" 2>/dev/null)"
+    local logf=""
+    for d in "/usr/share/doc/$pkg" "/usr/share/doc/${src}-common" "/usr/share/doc/$src"; do
+      [ -r "$d/changelog.Debian.gz" ] && { logf="$d/changelog.Debian.gz"; break; }
+    done
+    if [ -n "$logf" ]; then
+      if zcat "$logf" 2>/dev/null | grep -qE 'CVE-2026-10961[89]'; then cl="mentions-cve"; else cl="not-mentioned"; fi
+    else
+      cl="changelog-unavailable"
+    fi
+  elif have apk && apk info --who-owns "$f" >/dev/null 2>&1; then
+    pkg="$(apk info --who-owns "$f" 2>/dev/null | awk '{print $NF}')"
+    ver="$pkg"; origin="alpine"; cl="check-secdb"
+  else
+    pkg="unpackaged"; cl="n/a"
+  fi
+  printf '%s|%s|%s|%s' "$pkg" "$ver" "$origin" "$cl"
+}
+
+branch_of() { printf '%s' "$1" | sed -n 's/^\([0-9]\{1,\}\.[0-9]\{1,\}\).*/\1/p'; }
+
+fix_status() { # $1=upstream version $2=changelog status $3=package origin $4=package name
+  local v="$1" cl="$2" origin="$3" pkg="$4"
+  if [ "$cl" = "mentions-cve" ]; then echo "patched (package changelog lists CVE)"; return; fi
+  # Distribution packages keep the old upstream version number and backport
+  # fixes, so an upstream version comparison would be wrong for them.
+  local distro=0
+  case "$pkg" in unpackaged|"") distro=0 ;; *)
+    case "$origin" in
+      *sury*|*Remi*|*remi*) distro=0 ;;
+      *) distro=1 ;;
+    esac ;;
+  esac
+  if [ "$distro" -eq 1 ]; then
+    echo "NOT CONFIRMED - distro package; changelog does not list the CVEs yet (check vendor advisory)"
+    return
+  fi
+  if [ -z "$FIXED_UPSTREAM" ]; then echo "pending - official advisory not yet published"; return; fi
+  local br; br="$(branch_of "$v")"
+  for fv in $FIXED_UPSTREAM; do
+    if [ "$(branch_of "$fv")" = "$br" ]; then
+      if ver_ge "$v" "$fv"; then echo "patched (upstream >= $fv)"; else echo "NOT PATCHED (upstream < $fv)"; fi
+      return
+    fi
+  done
+  echo "NOT PATCHED - no upstream fix for branch $br (upgrade, or use a vendor/ESM backport)"
+}
+
+# --------------------------------------------------------------------------
+# 2. Inspect each runtime
+# --------------------------------------------------------------------------
+RUNTIME_JSON=()
+ANY_UNPATCHED=0
+NPHP=0
+
+report_runtime() { # $1=label $2=binary $3=normalised phpinfo $4=note $5=SAPI display override
+  local label="$1" bin="$2" info="$3" note="${4:-}" api_override="${5:-}"
+  local ver api ini scandir
+  ver="$(info_get "$info" "PHP Version")"
+  [ -n "$ver" ] || ver="$("$bin" -v 2>/dev/null | head -n1 | awk '{print $2}')"
+  api="$(info_get "$info" "Server API")"
+  [ -n "$api_override" ] && api="$api_override"
+  ini="$(info_get "$info" "Loaded Configuration File")"
+  scandir="$(info_get "$info" "Scan this dir for additional .ini files")"
+  local br branch_state
+  br="$(branch_of "$ver")"
+  case " $SUPPORTED_BRANCHES " in *" $br "*) branch_state="upstream-supported" ;; *) branch_state="upstream-EOL" ;; esac
+  local pi pkg pver porigin pcl
+  pi="$(pkg_info "$bin")"
+  pkg="${pi%%|*}"; pi="${pi#*|}"; pver="${pi%%|*}"; pi="${pi#*|}"; porigin="${pi%%|*}"; pcl="${pi#*|}"
+  local fs; fs="$(fix_status "$ver" "$pcl" "$porigin" "$pkg")"
+  case "$fs" in patched*) ;; *) ANY_UNPATCHED=1 ;; esac
+  NPHP=$((NPHP+1))
+
+  hr
+  say "Runtime  : $label"
+  say "Binary   : $bin"
+  say "Version  : ${ver:-unknown}   (branch ${br:-?}: $branch_state)"
+  say "SAPI     : ${api:-unknown}${note:+   [$note]}"
+  say "php.ini  : ${ini:-none}   scan dir: ${scandir:-none}"
+  say "Package  : $pkg ${pver}  ${porigin:+[$porigin]}"
+  say "Changelog: $pcl    Fix status: $fs"
+  local kv=""
+  for k in $KEYS; do
+    local v; v="$(info_get "$info" "$k")"
+    say "$(printf '   %-34s %s' "$k" "${v:-<not set>}")"
+    kv="$kv$(json_str "$k"):$(json_str "${v:-}"),"
+  done
+  local upe; upe="$(info_get "$info" "session.upload_progress.enabled")"
+  case "$upe" in
+    On|1)
+      case "$label" in
+        php-fpm*) say "   -> ON in php.ini - pools may override it (see 'Overrides' below). Patch is still required." ;;
+        *)        say "   -> session.upload_progress.enabled is ON (partial mitigation NOT applied; patch is still required)" ;;
+      esac ;;
+  esac
+  [ "$branch_state" = "upstream-EOL" ] && say "   -> Branch $br gets no upstream fix. Only a distro backport/ESM, a paid backport or an upgrade closes it."
+
+  RUNTIME_JSON+=("{\"label\":$(json_str "$label"),\"binary\":$(json_str "$bin"),\"version\":$(json_str "$ver"),\"branch\":$(json_str "$br"),\"branch_state\":$(json_str "$branch_state"),\"server_api\":$(json_str "$api"),\"note\":$(json_str "$note"),\"php_ini\":$(json_str "$ini"),\"scan_dir\":$(json_str "$scandir"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"settings\":{${kv%,}}}")
+}
+
+say "ORBITRON php2shell exposure checker v$SCRIPT_VERSION  |  $CVES"
+say "Host: $HOSTNAME_S  |  OS: $OS_NAME  |  $NOW"
+[ -n "$FIXED_UPSTREAM" ] || say "NOTE: fixed versions not configured yet (official advisory pending). Fix status relies on package changelogs only."
+
+for bin in "${BINARIES[@]+"${BINARIES[@]}"}"; do
+  raw="$($TIMEOUT "$bin" -i 2>/dev/null)"
+  if [ -z "$raw" ]; then
+    say "WARNING: could not run '$bin -i' - skipping detailed check"
+    continue
+  fi
+  info="$(printf '%s\n' "$raw" | phpinfo_norm)"
+  name="$(basename "$bin")"
+  case "$name" in
+    php-fpm*) report_runtime "php-fpm" "$bin" "$info" "master ini only - see pool overrides below" ;;
+    php-cgi*) report_runtime "php-cgi" "$bin" "$info" ;;
+    lsphp*)   report_runtime "lsphp" "$bin" "$info" ;;
+    *)        report_runtime "php-cli" "$bin" "$info" "CLI values may differ from the web SAPI" ;;
+  esac
+done
+
+# --------------------------------------------------------------------------
+# 3. mod_php (Apache module) - evaluate the Apache-specific ini set
+# --------------------------------------------------------------------------
+MODPHP_NOTES=()
+for ap in /etc/php/*/apache2/php.ini; do
+  [ -r "$ap" ] || continue
+  vdir="$(dirname "$(dirname "$ap")")"; v="$(basename "$vdir")"
+  enabled="no"; ls /etc/apache2/mods-enabled/php"$v".load >/dev/null 2>&1 && enabled="yes"
+  cli=""; for cb in "/usr/bin/php$v" /usr/bin/php; do [ -x "$cb" ] && { cli="$cb"; break; }; done
+  if [ -n "$cli" ]; then
+    raw="$(PHP_INI_SCAN_DIR="$vdir/apache2/conf.d" $TIMEOUT "$cli" -c "$ap" -i 2>/dev/null)"
+    info="$(printf '%s\n' "$raw" | phpinfo_norm)"
+    report_runtime "mod_php $v (Apache module enabled: $enabled)" "$cli" "$info" "evaluated with $ap via CLI binary; Apache php_flag/php_admin_* overrides listed below" "apache2handler (mod_php)"
+  else
+    MODPHP_NOTES+=("mod_php ini $ap found but no matching CLI binary to evaluate it")
+  fi
+done
+if ls /etc/httpd/conf.modules.d/*php*.conf >/dev/null 2>&1 && grep -qsE 'LoadModule +php[0-9_]*_module' /etc/httpd/conf.modules.d/*php*.conf; then
+  MODPHP_NOTES+=("Apache httpd loads mod_php (RHEL family): it uses /etc/php.ini + /etc/php.d, i.e. the same values as the php-cli runtime above")
+fi
+for n in "${MODPHP_NOTES[@]+"${MODPHP_NOTES[@]}"}"; do hr; say "mod_php  : $n"; done
+
+# --------------------------------------------------------------------------
+# 4. Overrides (FPM pools, web server config, per-directory files)
+# --------------------------------------------------------------------------
+OVR_JSON=()
+add_override() { # $1=type $2=file:line:text
+  OVR_JSON+=("{\"type\":$(json_str "$1"),\"match\":$(json_str "$2")}")
+  say "   [$1] $2"
+}
+hr
+say "Overrides of session.upload_progress.* (pool / web server / per-directory):"
+OV_COUNT=0
+for d in /etc/php/*/fpm/pool.d /etc/php-fpm.d /etc/opt/remi/php*/php-fpm.d /opt/remi/php*/root/etc/php-fpm.d \
+         /opt/cpanel/ea-php*/root/etc/php-fpm.d /opt/plesk/php/*/etc/php-fpm.d /usr/local/etc/php-fpm.d \
+         /etc/php*/php-fpm.d /opt/alt/php*/etc/php-fpm.d /www/server/php/*/etc/php-fpm.d; do
+  [ -d "$d" ] || continue
+  while IFS= read -r m; do [ -n "$m" ] && { add_override "fpm-pool" "$m"; OV_COUNT=$((OV_COUNT+1)); }; done \
+    < <(grep -rHnE '^[^;#]*session\.upload_progress' "$d" 2>/dev/null)
+done
+for d in /etc/apache2 /etc/httpd /etc/nginx /usr/local/apache/conf /usr/local/lsws/conf /etc/openlitespeed; do
+  [ -d "$d" ] || continue
+  while IFS= read -r m; do [ -n "$m" ] && { add_override "webserver" "$m"; OV_COUNT=$((OV_COUNT+1)); }; done \
+    < <(grep -rHnE '^[^#]*session\.upload_progress' "$d" 2>/dev/null)
+done
+for w in "${WEBROOTS[@]}"; do
+  [ -d "$w" ] || continue
+  while IFS= read -r f; do
+    while IFS= read -r m; do [ -n "$m" ] && { add_override "per-dir" "$m"; OV_COUNT=$((OV_COUNT+1)); }; done \
+      < <(grep -HnE '^[^;#]*session\.upload_progress' "$f" 2>/dev/null)
+  done < <(find "$w" -maxdepth 8 \( -name .user.ini -o -name .htaccess \) -type f 2>/dev/null)
+done
+[ "$OV_COUNT" -eq 0 ] && say "   none found (defaults/ini values above apply)"
+say "   Note: .user.ini applies to FPM/CGI only; .htaccess php_flag/php_value to mod_php only;"
+say "         nginx 'fastcgi_param PHP_VALUE' / PHP_ADMIN_VALUE and FPM php_admin_* override php.ini."
+
+# --------------------------------------------------------------------------
+# 5. Running processes
+# --------------------------------------------------------------------------
+hr
+say "Running PHP / web server processes (master + worker counts):"
+PROC_JSON=()
+if have ps; then
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    say "   $line"
+    PROC_JSON+=("$(json_str "$line")")
+  done < <(ps -eo comm=,user= 2>/dev/null | awk '$1 ~ /^(php|php-fpm|php-cgi|lsphp|httpd|apache2|nginx|litespeed|lshttpd|openlitespeed)/ {c[$1" (user "$2")"]++} END {for (k in c) print c[k]"x "k}' | sort)
+fi
+[ ${#PROC_JSON[@]} -eq 0 ] && say "   none"
+
+# --------------------------------------------------------------------------
+# 6. Containers (opt-in: executes 'php' inside each running container)
+# --------------------------------------------------------------------------
+CONT_JSON=()
+if [ "$SCAN_CONTAINERS" -eq 1 ]; then
+  hr
+  say "Containers (CLI values shown; FPM inside the container may use another ini):"
+  for rt in docker podman; do
+    have "$rt" || continue
+    while IFS='|' read -r cid cimg; do
+      [ -n "$cid" ] || continue
+      r="$($TIMEOUT "$rt" exec "$cid" sh -c 'command -v php >/dev/null 2>&1 && php -r "echo PHP_VERSION,\"|\",ini_get(\"session.upload_progress.enabled\");"' 2>/dev/null)"
+      [ -n "$r" ] || continue
+      say "   [$rt] $cid $cimg -> PHP ${r%%|*}, session.upload_progress.enabled=${r#*|}"
+      CONT_JSON+=("{\"runtime\":$(json_str "$rt"),\"id\":$(json_str "$cid"),\"image\":$(json_str "$cimg"),\"php_version\":$(json_str "${r%%|*}"),\"upload_progress_enabled\":$(json_str "${r#*|}")}")
+      NPHP=$((NPHP+1)); ANY_UNPATCHED=1
+    done < <("$rt" ps --format '{{.ID}}|{{.Image}}' 2>/dev/null)
+  done
+  [ ${#CONT_JSON[@]} -eq 0 ] && say "   no running container with PHP found"
+fi
+
+# --------------------------------------------------------------------------
+# 7. Summary + JSON
+# --------------------------------------------------------------------------
+hr
+if [ "$NPHP" -eq 0 ]; then
+  RESULT="no-php-found"; RC=0
+  say "RESULT: no PHP runtime found on this host."
+elif [ "$ANY_UNPATCHED" -eq 1 ]; then
+  RESULT="php-found-not-confirmed-patched"; RC=2
+  say "RESULT: PHP found - at least one runtime is NOT confirmed patched against $CVES."
+  say "        Patch as soon as the fix is available for your package source; until then:"
+  say "        session.upload_progress.enabled=0 (partial mitigation only), restrict exposure,"
+  say "        enable the detection rules from the ORBITRON php2shell repository."
+else
+  RESULT="php-found-all-confirmed-patched"; RC=1
+  say "RESULT: PHP found - all runtimes confirmed patched (by changelog/upstream version)."
+fi
+
+join() { local IFS=,; printf '%s' "$*"; }
+JSON="{\"tool\":\"orbitron-php2shell-check\",\"tool_version\":$(json_str "$SCRIPT_VERSION"),\"cves\":[\"CVE-2026-109618\",\"CVE-2026-109619\"],\"timestamp\":$(json_str "$NOW"),\"host\":$(json_str "$HOSTNAME_S"),\"os\":$(json_str "$OS_NAME"),\"package_family\":$(json_str "$PKG_FAMILY"),\"fixed_upstream_configured\":$(json_str "$FIXED_UPSTREAM"),\"result\":$(json_str "$RESULT"),\"runtimes\":[$(join "${RUNTIME_JSON[@]+"${RUNTIME_JSON[@]}"}")],\"overrides\":[$(join "${OVR_JSON[@]+"${OVR_JSON[@]}"}")],\"processes\":[$(join "${PROC_JSON[@]+"${PROC_JSON[@]}"}")],\"containers\":[$(join "${CONT_JSON[@]+"${CONT_JSON[@]}"}")]}"
+
+[ "$JSON_ONLY" -eq 1 ] && printf '%s\n' "$JSON"
+if [ -n "$OUT_FILE" ]; then
+  printf '%s\n' "$JSON" > "$OUT_FILE" && say "JSON report written to $OUT_FILE"
+fi
+exit "$RC"
