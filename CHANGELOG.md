@@ -7,6 +7,11 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.1 — 2026-10-21
+* **Fix (Linux):** on RHEL/Rocky with Remi packages the script reported "Apache httpd loads mod_php" when
+  `15-php.conf` contained the `LoadModule` line inside `<IfModule mpm_prefork_module>` while httpd ran
+  `mpm_event` + PHP-FPM. Detection now uses `httpd -M`. Found on a Rocky Linux 9 production host.
+
 ## v1.3.0 — 2026-10-21 (after the PHP security release)
 * PHP released **8.5.12, 8.4.27, 8.3.36, 8.2.35**. Root cause from the official fix ("Avoid state corruption
   via bailout", GHSA-w8hw-w9fx-j79w / CVE-2026-109618, GHSA-6wmf-4rv5-p3rp / CVE-2026-109619): out-of-memory

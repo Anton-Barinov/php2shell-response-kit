@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.3.0  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.3.1  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -34,7 +34,7 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
 # Fixed upstream versions, from the official PHP security release of
@@ -484,8 +484,14 @@ for ap in /etc/php/*/apache2/php.ini; do
     MODPHP_NOTES+=("mod_php ini $ap found but no matching CLI binary to evaluate it")
   fi
 done
-if ls /etc/httpd/conf.modules.d/*php*.conf >/dev/null 2>&1 && grep -qsE 'LoadModule +php[0-9_]*_module' /etc/httpd/conf.modules.d/*php*.conf; then
-  MODPHP_NOTES+=("Apache httpd loads mod_php (RHEL family): it uses /etc/php.ini + /etc/php.d, i.e. the same values as the php-cli runtime above")
+# RHEL/Remi put the LoadModule line inside <IfModule mpm_prefork_module>: a matching line does not mean
+# the module is loaded (mpm_event + php-fpm is the default). Ask httpd when possible.
+if have httpd && [ -d /etc/httpd ]; then
+  if $TIMEOUT httpd -M 2>/dev/null | grep -qiE '^[[:space:]]*php[0-9_]*_module'; then
+    MODPHP_NOTES+=("Apache httpd loads mod_php (httpd -M): it uses /etc/php.ini + /etc/php.d, i.e. the same values as the php-cli runtime above")
+  fi
+elif ls /etc/httpd/conf.modules.d/*php*.conf >/dev/null 2>&1 && grep -qsE '^[[:space:]]*LoadModule +php[0-9_]*_module' /etc/httpd/conf.modules.d/*php*.conf; then
+  MODPHP_NOTES+=("Apache httpd config has a mod_php LoadModule line (httpd binary not found to confirm it is loaded; it may sit inside <IfModule mpm_prefork_module>)")
 fi
 for n in "${MODPHP_NOTES[@]+"${MODPHP_NOTES[@]}"}"; do hr; say "mod_php  : $n"; done
 
