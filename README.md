@@ -145,6 +145,7 @@ YARA, ModSecurity and the scripts were tested in our lab. Baseline 1–2 h befor
 | Webshell / `.user.ini` / `.htaccess` written to web root | `lnx_/win_..._file_written_to_webroot.yml` | ✓ | ✓ | use Falcon built-in webshell detections | ✓ | 109615, 109616, 109621 | YARA |
 | **PHP out of memory while parsing the request** (`Allowed memory size … in Unknown on line 0`) — trigger condition | `php2shell_php_oom_during_request_parsing.yml` | ✓ | payload | ✓ (needs log ingestion) | — | 109627, 109629 (burst) | — |
 | **Out-of-memory during parsing followed by a worker crash within 2 min** | — | — | — | — | — | 109628 (level 14) | — |
+| **PHP-FPM worker exited with code 70** (OOM during start-up — the clean exit, not a signal crash) | `php2shell_php_fpm_worker_exit_code70.yml` | ✓ | payload | ✓ (needs log ingestion) | — | 109630, 109631 (with OOM) | — |
 | PHP worker crash (SIGSEGV/SIGABRT) — memory-corruption attempts | `php2shell_php_worker_crash.yml` | ✓ | payload | ✓ (needs log ingestion) | — | 109625, 109626 | — |
 | Multipart part-header flood / request-body errors | — | — | — | — | — | — | ModSecurity 9109622, 9109623 |
 | Upload-progress field in multipart requests | — | — | — | — | — | — | ModSecurity 9109618/19/21 (+ blocking 9109620) |
@@ -190,7 +191,7 @@ In every case: **restart PHP-FPM / Apache / IIS app pools** after updating and r
 1. Run the v1.3.0 scripts: list runtimes that are `NOT PATCHED` / `NOT CONFIRMED`, their `Interim:` line and package source.
 2. Upstream-tracking hosts (php.net, Remi, Sury, official images, Windows): update to 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12, **restart** FPM / Apache / IIS app pools, rebuild **and redeploy** images. Re-run the script (`Running: LOADED`).
 3. Distribution packages (RHEL/Rocky/Alma, Ubuntu): until the vendor package lists the CVEs, apply the interim mitigations **with** a cgroup memory limit, and restrict exposure.
-4. Enable the out-of-memory and crash rules (Wazuh 109627–109629, Sigma), ModSecurity body limits + 9109622 in log mode, and the behavioural rules.
+4. Enable the out-of-memory, code-70 and crash rules (Wazuh 109627–109631, Sigma), ModSecurity body limits + 9109622 in log mode, and the behavioural rules.
 5. Hunt on hosts that were exposed: `in Unknown on line 0` out-of-memory errors and worker crashes since 20 Oct, webshells (YARA), new `.user.ini`/`.htaccess`, cron jobs and accounts.
 6. Upstream-EOL branches (≤ 8.1): upgrade, vendor/ESM backport, or isolate.
 

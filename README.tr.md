@@ -145,6 +145,7 @@ YARA, ModSecurity ve script'ler lab'ımızda test edildi. Alarm açmadan önce 1
 | Web köküne webshell / `.user.ini` / `.htaccess` yazılması | `lnx_/win_..._file_written_to_webroot.yml` | ✓ | ✓ | Falcon'un yerleşik webshell tespitleri | ✓ | 109615, 109616, 109621 | YARA |
 | **PHP isteği ayrıştırırken belleği tükendi** (`Allowed memory size … in Unknown on line 0`) — tetikleme koşulu | `php2shell_php_oom_during_request_parsing.yml` | ✓ | payload | ✓ (log ingestion gerekir) | — | 109627, 109629 (seri) | — |
 | **Ayrıştırma sırasında bellek tükenmesinden sonra 2 dk içinde worker çökmesi** | — | — | — | — | — | 109628 (seviye 14) | — |
+| **PHP-FPM worker'ı code 70 ile kapandı** (başlatmada OOM — sinyalle çökme değil, temiz çıkış) | `php2shell_php_fpm_worker_exit_code70.yml` | ✓ | payload | ✓ (log ingestion gerekir) | — | 109630, 109631 (OOM ile) | — |
 | PHP worker çökmesi (SIGSEGV/SIGABRT) — bellek bozulması denemeleri | `php2shell_php_worker_crash.yml` | ✓ | payload | ✓ (log ingestion gerekir) | — | 109625, 109626 | — |
 | Multipart part-başlık seli / istek gövdesi hataları | — | — | — | — | — | — | ModSecurity 9109622, 9109623 |
 | Multipart isteklerde upload-progress alanı | — | — | — | — | — | — | ModSecurity 9109618/19/21 (+ engelleme 9109620) |

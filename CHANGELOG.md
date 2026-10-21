@@ -7,6 +7,13 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.3.3 — 2026-10-21
+* **New rule (lab finding):** on PHP-FPM an out-of-memory during request start-up does not crash the worker
+  with a signal — the worker exits cleanly with **code 70** (FPM_EXIT_SOFTWARE). This is the most common
+  observable of the php2shell trigger on FPM and the signal-based crash rule (109625) does not catch it.
+  Added Sigma `php2shell_php_fpm_worker_exit_code70` (+ Splunk, QRadar payload, CrowdStrike), Wazuh 109630
+  (code 70) and 109631 (code 70 within 2 min of an out-of-memory during parsing = OOM trigger confirmed).
+
 ## v1.3.2 — 2026-10-21
 * README (EN/TR): **correction** — the pre-disclosure lab note "a non-existent `.php` path does not trigger it"
   applies to mod_php / built-in server only. Lab test: unpatched PHP-FPM parses the request body (upload

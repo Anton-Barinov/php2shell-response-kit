@@ -100,6 +100,23 @@
     <mitre><id>T1190</id></mitre>
   </rule>
 
+  <!-- PHP-FPM exits a worker with FPM_EXIT_SOFTWARE (70) when request start-up fails. For php2shell the
+       relevant cause is an out-of-memory during request parsing (lab-verified): the worker does NOT crash
+       with a signal, it exits cleanly with code 70. This is the most common observable of the OOM trigger
+       on PHP-FPM, which the signal-based crash rule (109625) does not catch. -->
+  <rule id="109630" level="7">
+    <match type="pcre2">exited with code 70\b</match>
+    <description>php2shell: PHP-FPM worker exited with code 70 (request start-up failure; OOM during parsing is the php2shell-relevant cause)</description>
+    <mitre><id>T1190</id></mitre>
+  </rule>
+
+  <rule id="109631" level="13" timeframe="120">
+    <if_sid>109630</if_sid>
+    <if_matched_sid>109627</if_matched_sid>
+    <description>php2shell: PHP-FPM worker exited with code 70 right after an out-of-memory during request parsing - OOM trigger confirmed on this worker</description>
+    <mitre><id>T1190</id></mitre>
+  </rule>
+
 </group>
 
 <group name="php2shell,windows,sysmon,">
