@@ -1,6 +1,6 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON müdahale kiti
 
-> **Durum: v1.0 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 10:30 TSİ / 07:30 UTC).**
+> **Durum: v1.1 — RESMİ AÇIKLAMA ÖNCESİ (21.10.2026 12:15 TSİ / 09:15 UTC).**
 > Teknik detayları, etkilenen ve düzeltilmiş sürümleri içeren resmi PHP duyurusu
 > **21.10.2026 17:00 TSİ (14:00 UTC)** için planlandı. Sürüm çıktıktan sonra bu repo güncellenecek.
 > Aşağıda *bildirilen* veya *doğrulanmamış* olarak işaretlenen her şey değişebilir. Değişiklikler: [CHANGELOG.md](CHANGELOG.md).
@@ -59,8 +59,8 @@ Zaman çizelgesi: 20 Ekim ~18:20 TSİ Hacker News'te sızıntı → 20 Ekim 22:3
 
 | Script | Platform | Ne yapar |
 |---|---|---|
-| [`scripts/linux/php2shell-check.sh`](scripts/linux/php2shell-check.sh) | Linux (RHEL ailesi, Debian/Ubuntu, Alpine, cPanel/Plesk/CloudLinux/Remi yolları) | Tüm PHP binary'lerini ve SAPI'leri bulur, SAPI bazında **etkin** ayarları okur (CLI, FPM, CGI, mod_php ini seti), FPM pool / web sunucusu / `.user.ini` / `.htaccess` override'larını listeler, paket ve kaynağını (dağıtım, Remi, Sury), paket changelog'unda CVE'lerin geçip geçmediğini, çalışan süreçleri ve opsiyonel olarak container'ları raporlar |
-| [`scripts/windows/php2shell-check.ps1`](scripts/windows/php2shell-check.ps1) | Windows (IIS FastCGI, XAMPP, WAMP, Laragon, Plesk, PATH, çalışan süreçler) | Aynısını Windows için yapar; her IIS FastCGI uygulamasını kendi argümanları/`PHPRC` değeriyle değerlendirir |
+| [`scripts/linux/php2shell-check.sh`](scripts/linux/php2shell-check.sh) | Linux (RHEL ailesi, Debian/Ubuntu, Alpine, cPanel/Plesk/CloudLinux/Remi yolları) | Tüm PHP binary'lerini ve SAPI'leri bulur, SAPI bazında **etkin** ayarları okur (CLI, FPM, CGI, mod_php ini seti), FPM pool / web sunucusu / `.user.ini` / `.htaccess` override'larını listeler, paket ve kaynağını (dağıtım, Remi, Sury), paket changelog'unda CVE'lerin geçip geçmediğini, çalışan süreçleri, **çalışan FPM worker'larının / Apache alt süreçlerinin son config değişikliğinden sonra başlatılıp başlatılmadığını ve güncel binary'yi kullanıp kullanmadığını** (`LOADED` / `STALE` / `RESTART REQUIRED`) ve opsiyonel olarak container'ları raporlar |
+| [`scripts/windows/php2shell-check.ps1`](scripts/windows/php2shell-check.ps1) | Windows (IIS FastCGI, XAMPP, WAMP, Laragon, Plesk, PATH, çalışan süreçler) | Aynısını Windows için yapar; her IIS FastCGI uygulamasını kendi argümanları/`PHPRC` değeriyle değerlendirir; çalışan `php-cgi.exe` / Apache süreçlerinin son `php.ini` değişikliğinden veya PHP binary'sinden eski olup olmadığını kontrol eder (IIS `monitorChangesTo` dahil) |
 
 İkisi de **yalnızca okuma yapar**, ağ bağlantısı kurmaz ve istismar denemez. Filo genelinde toplama
 için JSON çıktı verir (ör. ORBITRON Command Engine, Ansible, SCCM/Intune).
@@ -87,6 +87,9 @@ Kontrol listesi:
 3. Paketlerinizin nereden geldiğini kaydedin (dağıtım, Remi, Sury, panel üreticisi) — ne zaman yama yapabileceğinizi bu belirler.
 4. İnternete açık sunuculara öncelik verin; 21 Ekim 17:00 TSİ sonrası için değişiklik pencereleri hazırlayın.
 5. Güncellemeden sonra FPM pool'larının / container'ların **yeniden başlatıldığını** kontrol edin (çalışan worker eski binary'yi kullanmaya devam eder).
+   Yukarıdaki ayarlar diskteki ini dosyalarından okunur; çalışan süreçlerin bunları gerçekten kullanıp kullanmadığını
+   `Running:` satırı gösterir. `STALE` = reload gerekli, `RESTART REQUIRED` = süreçler paket güncellemesiyle değiştirilmiş
+   eski binary'yi çalıştırıyor.
 
 ## 5. Bilinen workaround'lar — güncel durum
 

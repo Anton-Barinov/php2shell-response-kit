@@ -1,11 +1,13 @@
-# What was tested (v1.0.0)
+# What was tested (v1.1.0)
 
 | Component | Test | Result |
 |---|---|---|
 | `scripts/linux/php2shell-check.sh` | Ubuntu 24.04, PHP 8.3.6 CLI + FPM + CGI + mod_php; FPM pool, `.user.ini`, `.htaccess` overrides; JSON validated; `shellcheck -S warning` clean; fixed-version logic with simulated values; unpackaged binary | Pass |
-| `scripts/linux/php2shell-check.sh` | RHEL family / rpm code path | **Not tested** (no RHEL host in lab) |
+| `scripts/linux/php2shell-check.sh` (v1.1 `Running:` check) | Ubuntu 24.04: FPM (`pm=dynamic` and `ondemand`) and Apache mod_php — config change without reload → `STALE`; reload/graceful → `LOADED`; binary replaced while running → `RESTART REQUIRED`; ondemand master predating change → `UNVERIFIED`; standalone php-cgi | Pass |
+| `scripts/linux/php2shell-check.sh` | RHEL family / rpm code path | v1.0 output reviewed from a Rocky Linux 10.2 production host; v1.1 not yet run on RHEL |
 | `scripts/windows/php2shell-check.ps1` | Parsed and executed with PowerShell 7 on Linux against php / php-cgi (text + HTML phpinfo parsing, JSON, fixed-version logic) | Pass |
-| `scripts/windows/php2shell-check.ps1` | Real Windows / IIS / XAMPP host, Windows PowerShell 5.1 | **Not tested** |
+| `scripts/windows/php2shell-check.ps1` (v1.1 `Running:` check) | PowerShell 7 on Linux against a running php-cgi: php.ini change → `STALE`, binary replaced → `RESTART REQUIRED`, restart → `LOADED` | Pass |
+| `scripts/windows/php2shell-check.ps1` | Real Windows / IIS / XAMPP host, Windows PowerShell 5.1 (CIM process data, `monitorChangesTo`) | **Not tested** |
 | `rules/yara/php2shell_hunting.yar` | Compiled (yara-python 4.5); 5 webshell samples, 2 benign PHP files, `.user.ini` (malicious + Wordfence), real PHP upload-progress session file | Expected matches only |
 | `rules/modsecurity/php2shell-upload-progress.conf` | ModSecurity 2.9 + Apache 2.4 + mod_php: normal multipart upload (no hit), upload-progress field (9109618), long value (9109619), blocking variant (403), urlencoded body (no hit) | Pass |
 | `rules/wazuh/*.xml` | XML well-formedness; PCRE2 patterns exercised with positive/negative strings | Pass — **not loaded into a Wazuh manager** |

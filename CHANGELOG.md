@@ -7,6 +7,17 @@
 * Wazuh rules (auditd, FIM, Sysmon, crash logs), YARA hunting rules, ModSecurity rules (lab-tested).
 * Workaround status: `session.upload_progress.enabled=0` = partial mitigation only (per Flatt Security update).
 
+## v1.1.0 — 2026-10-21 12:15 TRT
+* Scripts: new `Running:` check per runtime. Settings were read from the ini files on disk only, so an `Off`
+  result did not prove that running workers had been reloaded. Both scripts now compare the start time of the
+  running processes with the last config change and with the PHP binary:
+  `LOADED`, `STALE` (reload/recycle needed), `RESTART REQUIRED` (binary replaced by an update, service not
+  restarted), `UNVERIFIED` (Linux: master only, e.g. `pm=ondemand`), `not running`.
+* Linux: FPM pool files and `php-fpm.conf` are part of the config comparison; processes running a deleted
+  (replaced) binary are flagged and the runtime is treated as not patched.
+* Windows: reports IIS FastCGI `monitorChangesTo`; without it IIS does not restart php-cgi on php.ini edits.
+* JSON: `runtime_state` per runtime and top-level `stale_runtime`.
+
 ## v1.0.1 — 2026-10-21
 * README: added the ORBITRON investigation playbook (screenshot) as section 11.
 

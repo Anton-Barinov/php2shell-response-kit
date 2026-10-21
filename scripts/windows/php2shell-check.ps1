@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  ORBITRON php2shell exposure checker (Windows)   v1.0.0 (2026-10-21)
+  ORBITRON php2shell exposure checker (Windows)   v1.1.0 (2026-10-21)
   CVE-2026-109618 / CVE-2026-109619 ("php2shell")
 
 .DESCRIPTION
@@ -13,7 +13,9 @@
       (evaluated with the same php.ini / -c / PHPRC that IIS FastCGI uses)
     - per-directory overrides (.user.ini / .htaccess) under IIS site roots
       and given web roots, plus "-d" overrides in FastCGI arguments
-    - running PHP / web server processes
+    - running PHP / web server processes, and whether the RUNNING php-cgi /
+      Apache processes were started after the last php.ini change and after
+      the PHP binary was replaced (otherwise they still use old values/code)
   Windows PHP builds are upstream builds, so fix status is decided by the
   upstream version once the fixed versions are configured.
 
@@ -48,7 +50,7 @@ $ErrorActionPreference = 'Continue'
 $PhpPath = @($PhpPath | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $WebRoot = @($WebRoot | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
-$ScriptVersion   = '1.0.0'
+$ScriptVersion   = '1.1.0'
 $Cves            = @('CVE-2026-109618', 'CVE-2026-109619')
 # EMPTY until the official PHP advisory is published (2026-10-21 14:00 UTC).
 # Fill ONLY from https://www.php.net/ , e.g. '8.2.35 8.3.36 8.4.27 8.5.12'
@@ -141,6 +143,7 @@ function Add-Target([string]$Exe, [string]$ArgStr = '', [hashtable]$EnvVars = @{
 }
 
 $siteRoots = New-Object System.Collections.ArrayList
+$fcgiMonitor = @{}   # php-cgi path -> IIS FastCGI monitorChangesTo
 $fastCgiOverrides = New-Object System.Collections.ArrayList
 
 # 1a. IIS FastCGI + site roots
@@ -154,6 +157,7 @@ if ($IsWin -and $appHost -and (Test-Path -LiteralPath $appHost)) {
       foreach ($ev in $a.SelectNodes('environmentVariables/environmentVariable')) { $envs[$ev.name] = Expand-Path $ev.value }
       $argStr = [string]$a.arguments
       Add-Target -Exe $a.fullPath -ArgStr $argStr -EnvVars $envs -Source 'IIS FastCGI'
+      $fcgiMonitor[(Expand-Path $a.fullPath).ToLowerInvariant()] = [string]$a.monitorChangesTo
       if ($argStr -match 'session\.upload_progress') { [void]$fastCgiOverrides.Add("IIS FastCGI arguments: $($a.fullPath) $argStr") }
     }
     foreach ($vd in $x.SelectNodes('//sites/site/application/virtualDirectory')) {
@@ -212,9 +216,13 @@ foreach ($n in @('php.exe', 'php-cgi.exe', 'php', 'php-cgi')) {
 $procList = @()
 try {
   if ($IsWin) {
-    $procList = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name, ExecutablePath, ProcessId)
+    $procList = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+      Select-Object Name, ExecutablePath, ProcessId, ParentProcessId, @{ n = 'StartTime'; e = { $_.CreationDate } })
   } else {
-    $procList = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.ProcessName; ExecutablePath = $_.Path; ProcessId = $_.Id } })
+    $procList = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+      $pp = $null; try { $pp = $_.Parent.Id } catch {}
+      $stt = $null; try { $stt = $_.StartTime } catch {}
+      [pscustomobject]@{ Name = $_.ProcessName; ExecutablePath = $_.Path; ProcessId = $_.Id; ParentProcessId = $pp; StartTime = $stt } })
   }
 } catch { $procList = @() }
 foreach ($p in $procList) {
@@ -232,6 +240,58 @@ if ($DeepScan -and $IsWin) {
 }
 
 # ----------------------------------------------------------------------------
+# Runtime state: the settings above come from php.ini on disk. A running
+# php-cgi.exe (IIS FastCGI) or Apache child keeps the values - and the PHP code -
+# it was started with until the app pool is recycled / Apache is restarted.
+# ----------------------------------------------------------------------------
+function Get-RuntimeState {
+  param([string]$Exe, [string]$Source, [string]$Ini, [string]$ScanDir)
+  $files = @()
+  if ($Ini -and $Ini -ne '(none)') { $files += $Ini }
+  foreach ($d in ($ScanDir -split [regex]::Escape([string][IO.Path]::PathSeparator))) {
+    if ($d -and $d -ne '(none)' -and (Test-Path -LiteralPath $d)) { $files += @(Get-ChildItem -LiteralPath $d -Filter '*.ini' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) }
+  }
+  $cfg = $files | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-Item -LiteralPath $_ } |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  $binTime = try { (Get-Item -LiteralPath $Exe).LastWriteTime } catch { $null }
+
+  $isApache = $Source -like 'Apache mod_php*'
+  $fam = @($procList | Where-Object {
+      $_.ExecutablePath -and $_.StartTime -and $(
+        if ($isApache) { $_.Name -match '^httpd(\.exe)?$' } else { $_.ExecutablePath -eq $Exe }) })
+  if ($fam.Count -eq 0) { return [ordered]@{ status = 'not-running'; text = 'not running' } }
+  $ids = @($fam | ForEach-Object { $_.ProcessId })
+  $workers = @($fam | Where-Object { $ids -contains $_.ParentProcessId })
+  $eval = if ($workers.Count -gt 0) { $workers } else { $fam }   # php-cgi under IIS has no php parent
+  $cfgTime = if ($cfg) { $cfg.LastWriteTime } else { $null }
+  $stale = @($eval | Where-Object { $cfgTime -and $_.StartTime -lt $cfgTime })
+  $oldBin = @($fam | Where-Object { $binTime -and -not $isApache -and $_.StartTime -lt $binTime })
+  $cfgDesc = if ($cfg) { "last php.ini change $($cfgTime.ToString('yyyy-MM-dd HH:mm:ss')) ($($cfg.FullName))" } else { 'php.ini change time unknown' }
+  $hint = if ($isApache) { 'restart Apache' } else { 'recycle the IIS application pool (or restart the service that spawns php-cgi)' }
+  if ($oldBin.Count -gt 0) {
+    $status = 'restart-required'
+    $text = "RESTART REQUIRED: $($oldBin.Count) process(es) started before the PHP binary was replaced ($($binTime.ToString('yyyy-MM-dd HH:mm:ss'))) - $hint"
+  } elseif ($stale.Count -gt 0) {
+    $status = 'stale'
+    $text = "STALE: $($stale.Count) of $($eval.Count) process(es) started before the $cfgDesc - $hint"
+  } else {
+    $status = 'loaded'
+    $text = "LOADED: all $($eval.Count) process(es) started after the $cfgDesc"
+  }
+  $mon = $fcgiMonitor[$Exe.ToLowerInvariant()]
+  if ($Source -like '*IIS FastCGI*') {
+    if ($mon) { $text += " [IIS monitorChangesTo=$mon]" }
+    else { $text += ' [IIS monitorChangesTo not set: php.ini edits are NOT picked up until the app pool recycles]' }
+  }
+  return [ordered]@{
+    status = $status; text = $text; processes = $fam.Count; evaluated = $eval.Count; stale = $stale.Count
+    old_binary = $oldBin.Count; config_file = $(if ($cfg) { $cfg.FullName } else { '' })
+    config_mtime = $(if ($cfgTime) { $cfgTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' })
+    iis_monitor_changes_to = $(if ($mon) { $mon } else { '' })
+  }
+}
+
+# ----------------------------------------------------------------------------
 # 2. Inspect runtimes
 # ----------------------------------------------------------------------------
 Say "ORBITRON php2shell exposure checker v$ScriptVersion  |  $($Cves -join ' ')"
@@ -243,6 +303,7 @@ if (-not $FixedUpstream) { Say 'NOTE: fixed versions not configured yet (officia
 
 $runtimes = New-Object System.Collections.ArrayList
 $anyUnpatched = $false
+$anyStale = $false
 foreach ($t in $targets) {
   $raw = Invoke-PhpInfo -Exe $t.Exe -ExtraArgs $t.Args -EnvVars $t.Env
   $info = ConvertFrom-PhpInfo $raw
@@ -271,11 +332,15 @@ foreach ($t in $targets) {
     Say '   -> session.upload_progress.enabled is ON (partial mitigation NOT applied; patch is still required)'
   }
   if ($branchState -eq 'upstream-EOL') { Say "   -> Branch $br gets no upstream fix: upgrade to a supported branch." }
+  $state = Get-RuntimeState -Exe $t.Exe -Source $t.Source -Ini $info['Loaded Configuration File'] -ScanDir $info['Scan this dir for additional .ini files']
+  Say "Running  : $($state.text)"
+  if ($state.status -in @('stale', 'restart-required')) { $anyStale = $true }
+  if ($state.status -eq 'restart-required') { $anyUnpatched = $true }
 
   [void]$runtimes.Add([ordered]@{
     binary = $t.Exe; arguments = $t.Args; source = $t.Source; version = $ver; branch = $br
     branch_state = $branchState; server_api = $info['Server API']; php_ini = $info['Loaded Configuration File']
-    fix_status = $fs; settings = $settings
+    fix_status = $fs; runtime_state = $state; settings = $settings
   })
 }
 
@@ -318,17 +383,19 @@ if ($runtimes.Count -eq 0) {
 } elseif ($anyUnpatched) {
   $result = 'php-found-not-confirmed-patched'; $rc = 2
   Say "RESULT: PHP found - at least one runtime is NOT confirmed patched against $($Cves -join ' ')."
+  if ($anyStale) { Say "        ATTENTION: running processes do not use the current php.ini/binary - see 'Running' lines; recycle/restart first." }
   Say '        Replace PHP with the fixed build as soon as it is published on windows.php.net;'
   Say '        until then: session.upload_progress.enabled=0 (partial mitigation only),'
   Say '        restrict exposure and enable the ORBITRON php2shell detection rules.'
 } else {
   $result = 'php-found-all-confirmed-patched'; $rc = 1
   Say 'RESULT: PHP found - all runtimes confirmed patched (upstream version).'
+  if ($anyStale) { Say "        ATTENTION: some running processes use an older php.ini - see 'Running' lines." }
 }
 
 $report = [ordered]@{
   tool = 'orbitron-php2shell-check'; tool_version = $ScriptVersion; cves = $Cves; timestamp = $now
-  host = $hostName; os = $osName; fixed_upstream_configured = $FixedUpstream; result = $result
+  host = $hostName; os = $osName; fixed_upstream_configured = $FixedUpstream; result = $result; stale_runtime = $anyStale
   runtimes = @($runtimes); overrides = @($overrides); processes = @($procSummary)
 }
 $jsonText = $report | ConvertTo-Json -Depth 6

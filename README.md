@@ -1,6 +1,6 @@
 # php2shell — CVE-2026-109618 / CVE-2026-109619 · ORBITRON response kit
 
-> **Status: v1.0 — PRE-DISCLOSURE (2026-10-21 10:30 TRT / 07:30 UTC).**
+> **Status: v1.1 — PRE-DISCLOSURE (2026-10-21 12:15 TRT / 09:15 UTC).**
 > The official PHP advisory with technical details, affected and fixed versions is scheduled for
 > **2026-10-21 14:00 UTC (17:00 TRT)**. This repository will be updated after the release.
 > Everything marked *reported* or *unconfirmed* below may change. Check [CHANGELOG.md](CHANGELOG.md).
@@ -59,8 +59,8 @@ publishes the advance notice → 21 Oct 14:00 UTC scheduled release.
 
 | Script | Platform | What it does |
 |---|---|---|
-| [`scripts/linux/php2shell-check.sh`](scripts/linux/php2shell-check.sh) | Linux (RHEL family, Debian/Ubuntu, Alpine, cPanel/Plesk/CloudLinux/Remi paths) | Finds every PHP binary and SAPI, reads the **effective** settings per SAPI (CLI, FPM, CGI, mod_php ini set), lists FPM-pool / web-server / `.user.ini` / `.htaccess` overrides, owning package + origin (distro, Remi, Sury), whether the package changelog already lists the CVEs, running processes, optional containers |
-| [`scripts/windows/php2shell-check.ps1`](scripts/windows/php2shell-check.ps1) | Windows (IIS FastCGI, XAMPP, WAMP, Laragon, Plesk, PATH, running processes) | Same for Windows; evaluates each IIS FastCGI application with its own arguments/`PHPRC` |
+| [`scripts/linux/php2shell-check.sh`](scripts/linux/php2shell-check.sh) | Linux (RHEL family, Debian/Ubuntu, Alpine, cPanel/Plesk/CloudLinux/Remi paths) | Finds every PHP binary and SAPI, reads the **effective** settings per SAPI (CLI, FPM, CGI, mod_php ini set), lists FPM-pool / web-server / `.user.ini` / `.htaccess` overrides, owning package + origin (distro, Remi, Sury), whether the package changelog already lists the CVEs, running processes, **whether the running FPM workers / Apache children were started after the last config change and still run the current binary** (`LOADED` / `STALE` / `RESTART REQUIRED`), optional containers |
+| [`scripts/windows/php2shell-check.ps1`](scripts/windows/php2shell-check.ps1) | Windows (IIS FastCGI, XAMPP, WAMP, Laragon, Plesk, PATH, running processes) | Same for Windows; evaluates each IIS FastCGI application with its own arguments/`PHPRC`, and checks whether running `php-cgi.exe` / Apache processes predate the last `php.ini` change or the PHP binary (incl. IIS `monitorChangesTo`) |
 
 Both are **read-only**, make no network connections and do not attempt exploitation. JSON output for
 fleet collection (e.g. via ORBITRON Command Engine, Ansible, SCCM/Intune).
@@ -87,6 +87,9 @@ Checklist:
 3. Record where your packages come from (distro, Remi, Sury, panel vendor) — that decides *when* you can patch.
 4. Prioritise internet-facing hosts; prepare change windows for 21 Oct after 14:00 UTC.
 5. Check that FPM pools / containers are **restarted** after updating (a running worker keeps the old binary).
+   The settings above are read from the ini files on disk; the `Running:` line shows whether the running
+   processes actually use them. `STALE` = reload needed, `RESTART REQUIRED` = processes still run a binary that
+   was replaced by a package update.
 
 ## 5. Known workarounds — current status
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ORBITRON php2shell exposure checker (Linux)        v1.0.0  (2026-10-21)
+#  ORBITRON php2shell exposure checker (Linux)        v1.1.0  (2026-10-21)
 #  CVE-2026-109618 / CVE-2026-109619  ("php2shell")
 #
 #  READ-ONLY. This script does not change configuration, does not install
@@ -11,7 +11,9 @@
 #    - per-pool / per-directory / web-server level overrides of those settings
 #    - owning package, repository origin and whether the package changelog
 #      already mentions the CVE IDs (distribution backport detection)
-#    - running PHP / web server processes
+#    - running PHP / web server processes, and whether the RUNNING workers
+#      actually use the current configuration and binary (a settings change
+#      or a package update only takes effect after a reload/restart)
 #    - optionally (--containers) PHP inside running Docker/Podman containers
 #
 #  Usage:  sudo ./php2shell-check.sh [--json] [-o report.json]
@@ -26,7 +28,7 @@
 set -u
 LC_ALL=C; export LC_ALL
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 CVES="CVE-2026-109618 CVE-2026-109619"
 
 # Fixed upstream versions. EMPTY until the official PHP advisory is published
@@ -216,14 +218,116 @@ fix_status() { # $1=upstream version $2=changelog status $3=package origin $4=pa
 }
 
 # --------------------------------------------------------------------------
+# Runtime state: do the RUNNING processes use the current config and binary?
+# The settings above are read from the ini files on disk. Running FPM/CGI
+# workers and Apache children keep the values (and the binary) they were
+# started with until a reload/restart.
+# --------------------------------------------------------------------------
+NOW_EPOCH="$(date +%s)"
+declare -A P_PPID P_START P_EXE
+if have ps; then
+  while read -r pid ppid et; do
+    [ -n "$pid" ] || continue
+    P_PPID[$pid]="$ppid"; P_START[$pid]=$((NOW_EPOCH - et))
+    P_EXE[$pid]="$(readlink "/proc/$pid/exe" 2>/dev/null)"
+  done < <(ps -eo pid=,ppid=,etimes= 2>/dev/null)
+fi
+ANY_STALE=0
+STATE_TEXT=""; STATE_JSON=""
+
+fmt_epoch() { date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$1"; }
+
+newest_mtime() { # files... -> "epoch|file" of the newest existing file
+  local best=0 bf="" f m
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    m="$(stat -c %Y "$f" 2>/dev/null)" || continue
+    if [ "${m:-0}" -gt "$best" ]; then best="$m"; bf="$f"; fi
+  done
+  printf '%s|%s' "$best" "$bf"
+}
+
+runtime_state() { # $1=match mode (bin|apache|none) $2=binary $3=php.ini $4=scan dir(s) $5=label
+  local mode="$1" bin="$2" ini="$3" scandir="$4" label="$5"
+  STATE_TEXT=""; STATE_JSON=""
+  if [ "$mode" = "none" ]; then
+    STATE_TEXT="n/a (CLI reads its configuration at every start)"
+    STATE_JSON="{\"status\":\"n/a\"}"; return
+  fi
+  # configuration files that the running SAPI loaded at start-up
+  local files=() d f
+  case "$ini" in ""|"(none)") ;; *) files+=("$ini") ;; esac
+  for d in ${scandir//:/ }; do
+    case "$d" in ""|"(none)") ;; *) for f in "$d"/*.ini; do files+=("$f"); done ;; esac
+  done
+  if [ -n "$ini" ] && [ "$mode" = "bin" ]; then
+    case "$label" in php-fpm*)
+      d="$(dirname "$ini")"
+      for f in "$d/php-fpm.conf" /etc/php-fpm.conf "$d"/pool.d/*.conf "$d"/php-fpm.d/*.conf /etc/php-fpm.d/*.conf; do files+=("$f"); done ;;
+    esac
+  fi
+  local nm cfg_epoch cfg_file
+  nm="$(newest_mtime "${files[@]+"${files[@]}"}")"; cfg_epoch="${nm%%|*}"; cfg_file="${nm#*|}"
+
+  # matching processes
+  local pid exe base fam=() deleted=0
+  for pid in "${!P_EXE[@]}"; do
+    exe="${P_EXE[$pid]}"; [ -n "$exe" ] || continue
+    base="$(basename "${exe% (deleted)}")"
+    case "$mode" in
+      bin)    [ "${exe% (deleted)}" = "$bin" ] || continue ;;
+      apache) case "$base" in httpd|apache2) ;; *) continue ;; esac ;;
+    esac
+    fam+=("$pid")
+    case "$exe" in *" (deleted)") deleted=$((deleted+1)) ;; esac
+  done
+  if [ ${#fam[@]} -eq 0 ]; then
+    STATE_TEXT="not running"
+    STATE_JSON="{\"status\":\"not-running\"}"; return
+  fi
+  # masters = processes whose parent is not of the same family; workers = the rest
+  local workers=0 stale=0 oldest=0 masters=0 mstale=0 p fampids=" ${fam[*]} "
+  for p in "${fam[@]}"; do
+    if [[ "$fampids" == *" ${P_PPID[$p]} "* ]]; then
+      workers=$((workers+1))
+      if [ "$oldest" -eq 0 ] || [ "${P_START[$p]}" -lt "$oldest" ]; then oldest="${P_START[$p]}"; fi
+      [ "$cfg_epoch" -gt 0 ] && [ "${P_START[$p]}" -lt "$cfg_epoch" ] && stale=$((stale+1))
+    else
+      masters=$((masters+1))
+      [ "$cfg_epoch" -gt 0 ] && [ "${P_START[$p]}" -lt "$cfg_epoch" ] && mstale=$((mstale+1))
+    fi
+  done
+  local status
+  local cfgdesc
+  cfgdesc="last config change $(fmt_epoch "$cfg_epoch") (${cfg_file:-unknown})"
+  if [ "$deleted" -gt 0 ]; then
+    status="restart-required"; ANY_STALE=1; ANY_UNPATCHED=1
+    STATE_TEXT="RESTART REQUIRED: $deleted process(es) still run a binary that was replaced on disk (package updated, service not restarted)"
+  elif [ "$workers" -eq 0 ] && [ "$mstale" -eq 0 ]; then
+    status="loaded"
+    STATE_TEXT="LOADED: process(es) started after the $cfgdesc"
+  elif [ "$workers" -eq 0 ]; then
+    status="unverified"
+    STATE_TEXT="UNVERIFIED: no worker processes (e.g. pm=ondemand) and the master predates the $cfgdesc; a reload may keep the master's start time (systemd) - check the service log for a reload, or restart"
+  elif [ "$stale" -gt 0 ]; then
+    status="stale"; ANY_STALE=1
+    STATE_TEXT="STALE: $stale of $workers worker(s) started before the $cfgdesc - reload/restart the service"
+  else
+    status="loaded"
+    STATE_TEXT="LOADED: all $workers worker(s) started after the $cfgdesc"
+  fi
+  STATE_JSON="{\"status\":$(json_str "$status"),\"processes\":${#fam[@]},\"workers\":$workers,\"stale_workers\":$stale,\"deleted_binary_processes\":$deleted,\"config_mtime\":$(json_str "$(fmt_epoch "$cfg_epoch")"),\"config_file\":$(json_str "$cfg_file"),\"oldest_worker_start\":$(json_str "$( [ "$oldest" -gt 0 ] && fmt_epoch "$oldest")")}"
+}
+
+# --------------------------------------------------------------------------
 # 2. Inspect each runtime
 # --------------------------------------------------------------------------
 RUNTIME_JSON=()
 ANY_UNPATCHED=0
 NPHP=0
 
-report_runtime() { # $1=label $2=binary $3=normalised phpinfo $4=note $5=SAPI display override
-  local label="$1" bin="$2" info="$3" note="${4:-}" api_override="${5:-}"
+report_runtime() { # $1=label $2=binary $3=normalised phpinfo $4=note $5=SAPI display override $6=process match mode
+  local label="$1" bin="$2" info="$3" note="${4:-}" api_override="${5:-}" pmode="${6:-bin}"
   local ver api ini scandir
   ver="$(info_get "$info" "PHP Version")"
   [ -n "$ver" ] || ver="$("$bin" -v 2>/dev/null | head -n1 | awk '{print $2}')"
@@ -264,8 +368,10 @@ report_runtime() { # $1=label $2=binary $3=normalised phpinfo $4=note $5=SAPI di
       esac ;;
   esac
   [ "$branch_state" = "upstream-EOL" ] && say "   -> Branch $br gets no upstream fix. Only a distro backport/ESM, a paid backport or an upgrade closes it."
+  runtime_state "$pmode" "$bin" "$ini" "$scandir" "$label"
+  say "Running  : $STATE_TEXT"
 
-  RUNTIME_JSON+=("{\"label\":$(json_str "$label"),\"binary\":$(json_str "$bin"),\"version\":$(json_str "$ver"),\"branch\":$(json_str "$br"),\"branch_state\":$(json_str "$branch_state"),\"server_api\":$(json_str "$api"),\"note\":$(json_str "$note"),\"php_ini\":$(json_str "$ini"),\"scan_dir\":$(json_str "$scandir"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"settings\":{${kv%,}}}")
+  RUNTIME_JSON+=("{\"label\":$(json_str "$label"),\"binary\":$(json_str "$bin"),\"version\":$(json_str "$ver"),\"branch\":$(json_str "$br"),\"branch_state\":$(json_str "$branch_state"),\"server_api\":$(json_str "$api"),\"note\":$(json_str "$note"),\"php_ini\":$(json_str "$ini"),\"scan_dir\":$(json_str "$scandir"),\"package\":$(json_str "$pkg"),\"package_version\":$(json_str "$pver"),\"package_origin\":$(json_str "$porigin"),\"changelog_cve\":$(json_str "$pcl"),\"fix_status\":$(json_str "$fs"),\"runtime_state\":${STATE_JSON:-null},\"settings\":{${kv%,}}}")
 }
 
 say "ORBITRON php2shell exposure checker v$SCRIPT_VERSION  |  $CVES"
@@ -284,7 +390,7 @@ for bin in "${BINARIES[@]+"${BINARIES[@]}"}"; do
     php-fpm*) report_runtime "php-fpm" "$bin" "$info" "master ini only - see pool overrides below" ;;
     php-cgi*) report_runtime "php-cgi" "$bin" "$info" ;;
     lsphp*)   report_runtime "lsphp" "$bin" "$info" ;;
-    *)        report_runtime "php-cli" "$bin" "$info" "CLI values may differ from the web SAPI" ;;
+    *)        report_runtime "php-cli" "$bin" "$info" "CLI values may differ from the web SAPI" "" "none" ;;
   esac
 done
 
@@ -300,7 +406,7 @@ for ap in /etc/php/*/apache2/php.ini; do
   if [ -n "$cli" ]; then
     raw="$(PHP_INI_SCAN_DIR="$vdir/apache2/conf.d" $TIMEOUT "$cli" -c "$ap" -i 2>/dev/null)"
     info="$(printf '%s\n' "$raw" | phpinfo_norm)"
-    report_runtime "mod_php $v (Apache module enabled: $enabled)" "$cli" "$info" "evaluated with $ap via CLI binary; Apache php_flag/php_admin_* overrides listed below" "apache2handler (mod_php)"
+    report_runtime "mod_php $v (Apache module enabled: $enabled)" "$cli" "$info" "evaluated with $ap via CLI binary; Apache php_flag/php_admin_* overrides listed below" "apache2handler (mod_php)" "apache"
   else
     MODPHP_NOTES+=("mod_php ini $ap found but no matching CLI binary to evaluate it")
   fi
@@ -390,16 +496,18 @@ if [ "$NPHP" -eq 0 ]; then
 elif [ "$ANY_UNPATCHED" -eq 1 ]; then
   RESULT="php-found-not-confirmed-patched"; RC=2
   say "RESULT: PHP found - at least one runtime is NOT confirmed patched against $CVES."
+  [ "$ANY_STALE" -eq 1 ] && say "        ATTENTION: running processes do not use the current config/binary - see 'Running' lines; reload/restart first."
   say "        Patch as soon as the fix is available for your package source; until then:"
   say "        session.upload_progress.enabled=0 (partial mitigation only), restrict exposure,"
   say "        enable the detection rules from the ORBITRON php2shell repository."
 else
   RESULT="php-found-all-confirmed-patched"; RC=1
   say "RESULT: PHP found - all runtimes confirmed patched (by changelog/upstream version)."
+  [ "$ANY_STALE" -eq 1 ] && say "        ATTENTION: some running processes use an older config - see 'Running' lines."
 fi
 
 join() { local IFS=,; printf '%s' "$*"; }
-JSON="{\"tool\":\"orbitron-php2shell-check\",\"tool_version\":$(json_str "$SCRIPT_VERSION"),\"cves\":[\"CVE-2026-109618\",\"CVE-2026-109619\"],\"timestamp\":$(json_str "$NOW"),\"host\":$(json_str "$HOSTNAME_S"),\"os\":$(json_str "$OS_NAME"),\"package_family\":$(json_str "$PKG_FAMILY"),\"fixed_upstream_configured\":$(json_str "$FIXED_UPSTREAM"),\"result\":$(json_str "$RESULT"),\"runtimes\":[$(join "${RUNTIME_JSON[@]+"${RUNTIME_JSON[@]}"}")],\"overrides\":[$(join "${OVR_JSON[@]+"${OVR_JSON[@]}"}")],\"processes\":[$(join "${PROC_JSON[@]+"${PROC_JSON[@]}"}")],\"containers\":[$(join "${CONT_JSON[@]+"${CONT_JSON[@]}"}")]}"
+JSON="{\"tool\":\"orbitron-php2shell-check\",\"tool_version\":$(json_str "$SCRIPT_VERSION"),\"cves\":[\"CVE-2026-109618\",\"CVE-2026-109619\"],\"timestamp\":$(json_str "$NOW"),\"host\":$(json_str "$HOSTNAME_S"),\"os\":$(json_str "$OS_NAME"),\"package_family\":$(json_str "$PKG_FAMILY"),\"fixed_upstream_configured\":$(json_str "$FIXED_UPSTREAM"),\"result\":$(json_str "$RESULT"),\"stale_runtime\":$([ "$ANY_STALE" -eq 1 ] && echo true || echo false),\"runtimes\":[$(join "${RUNTIME_JSON[@]+"${RUNTIME_JSON[@]}"}")],\"overrides\":[$(join "${OVR_JSON[@]+"${OVR_JSON[@]}"}")],\"processes\":[$(join "${PROC_JSON[@]+"${PROC_JSON[@]}"}")],\"containers\":[$(join "${CONT_JSON[@]+"${CONT_JSON[@]}"}")]}"
 
 [ "$JSON_ONLY" -eq 1 ] && printf '%s\n' "$JSON"
 if [ -n "$OUT_FILE" ]; then
